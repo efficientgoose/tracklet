@@ -2,14 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-test('desktop CSS uses solid surfaces without translucent effects', () => {
+test('desktop CSS uses the revamped frosted widget styling', () => {
   const css = fs.readFileSync('src/ui/styles.css', 'utf8');
 
-  assert.match(css, /--ds-bg:\s*#f4f5f7/i);
-  assert.match(css, /font-family:\s*var\(--ds-font\)/i);
-  assert.doesNotMatch(css, /backdrop-filter/i);
-  assert.doesNotMatch(css, /rgba\(/i);
-  assert.doesNotMatch(css, /transparent/i);
+  assert.match(css, /#f2f2f7/i);
+  assert.match(css, /--brand:\s*#007aff/i);
+  assert.match(css, /border-radius:\s*20px/i);
+  assert.match(css, /backdrop-filter:\s*blur\(3px\)/i);
 });
 
 test('tauri window starts as a regular desktop app window', () => {

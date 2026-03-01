@@ -14,6 +14,8 @@ pub struct SyncStatus {
     pub ok: bool,
     pub error: Option<String>,
     pub last_synced_at: Option<String>,
+    pub account_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

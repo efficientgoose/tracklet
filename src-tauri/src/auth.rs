@@ -6,7 +6,9 @@ use url::Url;
 pub struct AuthStatus {
     pub authorized: bool,
     pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub site_url: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -16,6 +18,8 @@ pub struct JiraAuthSession {
     pub cloud_id: String,
     pub site_url: String,
     pub account_id: Option<String>,
+    pub account_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -54,7 +58,12 @@ struct AccessibleResource {
 
 #[derive(Debug, Deserialize)]
 struct AtlassianMe {
+    #[serde(alias = "accountId")]
     account_id: Option<String>,
+    #[serde(alias = "name")]
+    account_name: Option<String>,
+    #[serde(alias = "picture")]
+    avatar_url: Option<String>,
 }
 
 pub fn build_authorization_url(
@@ -323,6 +332,8 @@ fn build_auth_session(
     access_token: String,
     refresh_token: Option<String>,
     account_id: Option<String>,
+    account_name: Option<String>,
+    avatar_url: Option<String>,
     cloud_id: String,
     site_url: String,
 ) -> (AuthStatus, JiraAuthSession) {
@@ -332,36 +343,81 @@ fn build_auth_session(
         cloud_id,
         site_url: site_url.clone(),
         account_id: account_id.clone(),
+        account_name: account_name.clone(),
+        avatar_url: avatar_url.clone(),
     };
 
     let status = AuthStatus {
         authorized: true,
         account_id,
+        account_name,
         site_url: Some(site_url),
+        avatar_url,
     };
 
     (status, session)
 }
 
-fn fetch_account_id(access_token: &str) -> Option<String> {
+pub fn fetch_user_details(access_token: &str) -> (Option<String>, Option<String>, Option<String>) {
     let client = reqwest::blocking::Client::builder()
         .user_agent("Tracklet/0.1.0")
         .build()
-        .ok()?;
+        .ok()
+        .unwrap_or_else(|| reqwest::blocking::Client::new());
 
     let response = client
         .get("https://api.atlassian.com/me")
         .bearer_auth(access_token)
         .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
+        .ok();
 
-    response
-        .json::<AtlassianMe>()
+    if let Some(res) = response {
+        if res.status().is_success() {
+            if let Ok(me) = res.json::<AtlassianMe>() {
+                return (me.account_id, me.account_name, me.avatar_url);
+            }
+        }
+    }
+    (None, None, None)
+}
+
+pub fn fetch_user_details_from_site(access_token: &str, cloud_id: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Tracklet/0.1.0")
+        .build()
         .ok()
-        .and_then(|me| me.account_id)
+        .unwrap_or_else(|| reqwest::blocking::Client::new());
+
+    let url = format!("https://api.atlassian.com/ex/jira/{}/rest/api/3/myself", cloud_id);
+    let response = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .ok();
+    
+    if let Some(res) = response {
+        if res.status().is_success() {
+            #[derive(Deserialize)]
+            struct AvatarUrls {
+                #[serde(rename = "48x48")]
+                larget: String,
+            }
+            #[derive(Deserialize)]
+            struct JiraMe {
+                #[serde(rename = "accountId")]
+                account_id: String,
+                #[serde(rename = "displayName")]
+                display_name: String,
+                #[serde(rename = "avatarUrls")]
+                avatar_urls: Option<AvatarUrls>,
+            }
+
+            if let Ok(me) = res.json::<JiraMe>() {
+                return (Some(me.account_id), Some(me.display_name), me.avatar_urls.map(|a| a.larget));
+            }
+        }
+    }
+    (None, None, None)
 }
 
 pub fn complete_authorization(
@@ -378,7 +434,7 @@ pub fn complete_authorization(
         );
     }
 
-    let account_id = fetch_account_id(&token.access_token);
+    let (account_id, account_name, avatar_url) = fetch_user_details(&token.access_token);
     let (preferred_cloud_id, preferred_site_url) = selected_site_preferences();
 
     if preferred_cloud_id.is_some() || preferred_site_url.is_some() {
@@ -387,10 +443,19 @@ pub fn complete_authorization(
             preferred_cloud_id.as_deref(),
             preferred_site_url.as_deref(),
         )?;
+        let selected_resource = selected_resource.clone();
+        let (account_id, account_name, avatar_url) = if account_id.is_none() {
+            fetch_user_details_from_site(&token.access_token, &selected_resource.id)
+        } else {
+            (account_id, account_name, avatar_url)
+        };
+
         let (status, session) = build_auth_session(
             token.access_token,
             token.refresh_token,
             account_id,
+            account_name,
+            avatar_url,
             selected_resource.id,
             selected_resource.url,
         );
@@ -399,10 +464,17 @@ pub fn complete_authorization(
 
     if jira_resources.len() == 1 {
         let selected_resource = jira_resources[0].clone();
+        let (account_id, account_name, avatar_url) = if account_id.is_none() {
+            fetch_user_details_from_site(&token.access_token, &selected_resource.id)
+        } else {
+            (account_id, account_name, avatar_url)
+        };
         let (status, session) = build_auth_session(
             token.access_token,
             token.refresh_token,
             account_id,
+            account_name,
+            avatar_url,
             selected_resource.id,
             selected_resource.url,
         );
@@ -429,10 +501,19 @@ pub fn complete_site_selection(
         .find(|option| option.cloud_id == cloud_id)
         .ok_or_else(|| format!("Invalid Jira site selection: {cloud_id}"))?;
 
+    let (account_id, account_name, avatar_url) = if pending.account_id.is_none() {
+        fetch_user_details_from_site(&pending.access_token, &site.cloud_id)
+    } else {
+        // Re-fetch to get name and avatar
+        fetch_user_details_from_site(&pending.access_token, &site.cloud_id)
+    };
+    
     Ok(build_auth_session(
         pending.access_token.clone(),
         pending.refresh_token.clone(),
-        pending.account_id.clone(),
+        account_id,
+        account_name,
+        avatar_url,
         site.cloud_id.clone(),
         site.site_url.clone(),
     ))
@@ -447,7 +528,9 @@ pub fn complete_callback_with_expected_state(
     Ok(AuthStatus {
         authorized: true,
         account_id: None,
+        account_name: None,
         site_url: None,
+        avatar_url: None,
     })
 }
 

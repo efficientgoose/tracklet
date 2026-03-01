@@ -17,10 +17,9 @@ use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 use timer_engine::TimerEngine;
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const MAIN_WINDOW_WIDTH: f64 = 450.0;
-const MAIN_WINDOW_HEIGHT: f64 = 486.0;
+const MAIN_WINDOW_WIDTH: f64 = 368.0;
+const MAIN_WINDOW_HEIGHT: f64 = 520.0;
 
-#[derive(Default)]
 struct AppState {
     timer: Mutex<TimerEngine>,
     oauth_state: Mutex<Option<String>>,
@@ -30,6 +29,7 @@ struct AppState {
     pending_site_selection: Mutex<Option<auth::PendingSiteSelection>>,
     last_sync_at: Mutex<Option<String>>,
     last_sync_error: Mutex<Option<String>>,
+    db: Arc<db::Db>,
 }
 
 #[derive(Debug, Serialize)]
@@ -453,8 +453,9 @@ fn complete_jira_authorization(
                     .jira_session
                     .lock()
                     .expect("jira session lock poisoned");
-                *session_guard = Some(session);
+                *session_guard = Some(session.clone());
             }
+            let _ = state.db.save_jira_session(&session);
             {
                 let mut pending_site_guard = state
                     .pending_site_selection
@@ -481,8 +482,9 @@ fn complete_jira_authorization(
                             .jira_session
                             .lock()
                             .expect("jira session lock poisoned");
-                        *session_guard = Some(session);
+                        *session_guard = Some(session.clone());
                     }
+                    let _ = state.db.save_jira_session(&session);
                     {
                         let mut pending_site_guard = state
                             .pending_site_selection
@@ -579,8 +581,9 @@ fn select_jira_site(
             .jira_session
             .lock()
             .expect("jira session lock poisoned");
-        *session_guard = Some(session);
+        *session_guard = Some(session.clone());
     }
+    let _ = state.db.save_jira_session(&session);
     {
         let mut pending_site_guard = state
             .pending_site_selection
@@ -620,6 +623,12 @@ fn fetch_assigned_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> 
                 .lock()
                 .expect("sync error lock poisoned");
             *sync_error_guard = None;
+
+            // Cache issues in the background
+            if let Some(account_id) = &session.account_id {
+                let _ = state.db.save_jira_issues(&issues, account_id);
+            }
+
             issues
         }
         Err(error) => {
@@ -631,6 +640,22 @@ fn fetch_assigned_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> 
             Vec::new()
         }
     }
+}
+
+#[tauri::command]
+fn get_cached_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> {
+    let maybe_session = state
+        .jira_session
+        .lock()
+        .expect("jira session lock poisoned")
+        .clone();
+
+    if let Some(session) = maybe_session {
+        if let Some(account_id) = session.account_id {
+            return state.db.get_jira_issues(&account_id).unwrap_or_default();
+        }
+    }
+    Vec::new()
 }
 
 #[tauri::command]
@@ -646,6 +671,8 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
             ok: false,
             error: Some("Select Jira site to finish authorization".to_string()),
             last_synced_at: None,
+            account_name: None,
+            avatar_url: None,
         };
     }
 
@@ -660,6 +687,8 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
             ok: false,
             error: Some("Not authorized with Jira".to_string()),
             last_synced_at: None,
+            account_name: None,
+            avatar_url: None,
         };
     }
 
@@ -674,11 +703,21 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
         .expect("sync at lock poisoned")
         .clone();
 
+    let (account_name, avatar_url) = {
+        let session = state.jira_session.lock().unwrap();
+        (
+            session.as_ref().and_then(|s| s.account_name.clone()),
+            session.as_ref().and_then(|s| s.avatar_url.clone()),
+        )
+    };
+
     jira::SyncStatus {
         authorized: true,
         ok: error.is_none(),
         error,
         last_synced_at,
+        account_name,
+        avatar_url,
     }
 }
 
@@ -903,11 +942,68 @@ fn load_env_file() {
 pub fn run() {
     load_env_file();
 
+    let app_data_dir = std::env::current_dir().unwrap_or_default(); // Fallback for simple dev
+    let db_path = app_data_dir.join("tracklet.db");
+    
+    let database = db::Db::open(&db_path).expect("failed to open database");
+    database.migrate().expect("failed to run migrations");
+    
+    let initial_session = database.get_selected_jira_session().unwrap_or(None);
+    let db_arc = Arc::new(database);
+
     tauri::Builder::default()
         .enable_macos_default_menu(false)
-        .manage(AppState::default())
+        .manage(AppState {
+            timer: Mutex::new(TimerEngine::default()),
+            oauth_state: Mutex::new(None),
+            oauth_callback_url: Arc::new(Mutex::new(None)),
+            oauth_callback_error: Arc::new(Mutex::new(None)),
+            jira_session: Mutex::new(initial_session),
+            pending_site_selection: Mutex::new(None),
+            last_sync_at: Mutex::new(None),
+            last_sync_error: Mutex::new(None),
+            db: db_arc,
+        })
         .setup(|app| {
+            // Re-open DB with proper app data path if possible
+            if let Ok(path) = app.path().app_data_dir() {
+                if !path.exists() {
+                    let _ = std::fs::create_dir_all(&path);
+                }
+                // In a real app we'd migrate here or use a persistent path.
+                // For now, tracklet.db in CWD is fine for dev.
+            }
             ensure_main_window(&app.handle());
+            
+            // Proactively refresh avatar if missing
+            let handle = app.handle().clone();
+            let session_opt = handle.state::<AppState>().jira_session.lock().unwrap().clone();
+            if let Some(session) = session_opt {
+                if session.avatar_url.is_none() || session.account_name.is_none() {
+                    std::thread::spawn(move || {
+                        let (_account_id, account_name, avatar_url) = crate::auth::fetch_user_details(&session.access_token);
+                        let (_account_id, account_name, avatar_url) = if account_name.is_none() {
+                            crate::auth::fetch_user_details_from_site(&session.access_token, &session.cloud_id)
+                        } else {
+                            (_account_id, account_name, avatar_url)
+                        };
+
+                        if avatar_url.is_some() || account_name.is_some() {
+                            let mut session = session.clone();
+                            if avatar_url.is_some() { session.avatar_url = avatar_url; }
+                            if account_name.is_some() { session.account_name = account_name; }
+                            
+                            let state = handle.state::<AppState>();
+                            // Update DB
+                            let _ = state.db.save_jira_session(&session);
+                            
+                            // Update State
+                            let mut state_session = state.jira_session.lock().unwrap();
+                            *state_session = Some(session);
+                        }
+                    });
+                }
+            }
             if let Some(tray) = app.tray_by_id("main") {
                 if let (Ok(open), Ok(quit)) = (
                     MenuItem::with_id(app, "open", "Open Tracklet Window", true, None::<&str>),
@@ -944,6 +1040,7 @@ pub fn run() {
             wait_for_oauth_callback,
             oauth_callback_status,
             fetch_assigned_issues,
+            get_cached_issues,
             jira_sync_status,
             timer_snapshot,
             start_timer,

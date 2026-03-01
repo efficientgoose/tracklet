@@ -25,7 +25,9 @@ export function coerceSyncStatus(raw) {
     authorized: raw?.authorized ?? false,
     ok: raw?.ok ?? true,
     error: raw?.error ?? null,
-    lastSyncedAt: raw?.lastSyncedAt ?? raw?.last_synced_at ?? null
+    lastSyncedAt: raw?.lastSyncedAt ?? raw?.last_synced_at ?? null,
+    accountName: raw?.accountName ?? raw?.account_name ?? null,
+    avatarUrl: raw?.avatarUrl ?? raw?.avatar_url ?? null
   };
 }
 
@@ -88,6 +90,10 @@ async function invokeOrMock(command, args = {}) {
       error: null,
       last_synced_at: nowIso()
     };
+  }
+
+  if (command === 'get_cached_issues') {
+    return [];
   }
 
   if (command === 'begin_jira_authorization') {
@@ -181,6 +187,18 @@ export async function oauthCallbackStatus() {
 export async function fetchAssignedIssues() {
   const issues = await invokeOrMock('fetch_assigned_issues');
   return issues.map((issue) =>
+    normalizeIssue({
+      id: issue.issue_id ?? issue.issueId,
+      key: issue.issue_key ?? issue.issueKey,
+      summary: issue.summary,
+      statusCategory: issue.status_category ?? issue.statusCategory
+    })
+  );
+}
+
+export async function getCachedIssues() {
+  const issues = await invokeOrMock('get_cached_issues');
+  return (issues ?? []).map((issue) =>
     normalizeIssue({
       id: issue.issue_id ?? issue.issueId,
       key: issue.issue_key ?? issue.issueKey,

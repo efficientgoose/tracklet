@@ -5,6 +5,10 @@ CREATE TABLE IF NOT EXISTS jira_accounts (
   cloud_id TEXT NOT NULL UNIQUE,
   site_url TEXT NOT NULL,
   account_id TEXT NOT NULL,
+  account_name TEXT,
+  avatar_url TEXT,
+  access_token TEXT NOT NULL,
+  refresh_token TEXT,
   is_selected INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

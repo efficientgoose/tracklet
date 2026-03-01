@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-test('task dropdown input renders before duration controls in timer panel', () => {
+test('ticket dropdown renders after timer actions in revamped timer panel', () => {
   const script = fs.readFileSync('src/ui/App.tsx', 'utf8');
-  const issueSelectIndex = script.indexOf('id="issueSelect"');
-  const durationWrapIndex = script.indexOf('className="duration-wrap"');
+  const ticketFieldIndex = script.indexOf('className="ticket-field"');
+  const timerActionsIndex = script.indexOf('className="timer-actions"');
 
-  assert.notEqual(issueSelectIndex, -1);
-  assert.notEqual(durationWrapIndex, -1);
-  assert.ok(issueSelectIndex < durationWrapIndex);
+  assert.notEqual(ticketFieldIndex, -1);
+  assert.notEqual(timerActionsIndex, -1);
+  assert.ok(ticketFieldIndex > timerActionsIndex);
 });
