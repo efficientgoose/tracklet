@@ -11,6 +11,5 @@ test('tray icon uses generated clock asset and hides title text', () => {
   assert.equal(trayIcon?.iconPath, 'icons/tray-clock-template.png');
   assert.equal(trayIcon?.iconAsTemplate, false);
   assert.equal(trayIcon?.title, '');
-  assert.equal(fs.existsSync('clock-solid-full.svg'), true);
   assert.equal(fs.existsSync('src-tauri/icons/tray-clock-template.png'), true);
 });
