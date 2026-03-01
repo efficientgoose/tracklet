@@ -1,0 +1,53 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock # remove this line if it's a binary crate (keep it for apps)
+
+# Node / Frontend
+node_modules/
+dist/
+.next/
+.nuxt/
+build/
+out/
+
+# Package manager locks (keep only the one you use)
+# yarn.lock
+# pnpm-lock.yaml
+# package-lock.json
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+*.dmg
+*.app
+*.pkg
+
+# macOS specific (the annoying ones)
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+__MACOSX/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tauri build artifacts
+src-tauri/gen/

@@ -1,0 +1,27 @@
+[package]
+name = "tracklet"
+version = "0.1.0"
+edition = "2021"
+description = "Tracklet menubar Jira timer"
+
+[lib]
+name = "tracklet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "native-tls"], default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
+thiserror = "2"
+url = "2"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
