@@ -92,35 +92,60 @@ export function aggregateByDay(snapshot, nowIso, days) {
   const sessions = [...snapshot.completedSessions];
   if (snapshot.activeSession) sessions.push(snapshot.activeSession);
 
-  // Map: dateKey → Map<issueKey, { issueKey, summary, totalSeconds }>
+  // Sort chronologically so we can track the last focus task before each break.
+  sessions.sort((a, b) => toMs(a.startedAt) - toMs(b.startedAt));
+
+  // Map: dateKey → { taskMap, breaks: [{seconds, linkedKey, linkedSummary}] }
   const dayMap = new Map();
+  // Track last focus issue seen globally (across sessions in order).
+  let lastFocusKey = null;
+  let lastFocusSummary = null;
 
   for (const session of sessions) {
     if (toMs(session.startedAt) < cutoff) continue;
     const key = dayKey(session.startedAt);
-    if (!dayMap.has(key)) dayMap.set(key, new Map());
-    const taskMap = dayMap.get(key);
+    if (!dayMap.has(key)) dayMap.set(key, { taskMap: new Map(), breaks: [] });
+    const day = dayMap.get(key);
 
     const secs = session.segments.reduce((acc, seg) => acc + segmentSeconds(seg, nowIso), 0);
     if (secs <= 0) continue;
 
-    const existing = taskMap.get(session.issueKey) || {
-      issueKey: session.issueKey,
-      summary: session.summary,
-      totalSeconds: 0,
-    };
-    existing.totalSeconds += secs;
-    taskMap.set(session.issueKey, existing);
+    if (session.issueKey === 'BREAK') {
+      day.breaks.push({ seconds: secs, linkedKey: lastFocusKey, linkedSummary: lastFocusSummary });
+    } else {
+      lastFocusKey = session.issueKey;
+      lastFocusSummary = session.summary;
+      const existing = day.taskMap.get(session.issueKey) || {
+        issueKey: session.issueKey,
+        summary: session.summary,
+        totalSeconds: 0,
+      };
+      existing.totalSeconds += secs;
+      day.taskMap.set(session.issueKey, existing);
+    }
   }
 
   return [...dayMap.entries()]
     .sort(([a], [b]) => (a < b ? 1 : -1))
-    .map(([key, taskMap]) => ({
-      dateKey: key,
-      dateLabel: dayLabel(key),
-      totalSeconds: [...taskMap.values()].reduce((s, t) => s + t.totalSeconds, 0),
-      tasks: [...taskMap.values()].sort((a, b) => b.totalSeconds - a.totalSeconds),
-    }));
+    .map(([key, { taskMap, breaks }]) => {
+      const breakSeconds = breaks.reduce((s, b) => s + b.seconds, 0);
+      // Merge breaks by linked task key so each task shows one break entry.
+      const breakByKey = new Map();
+      for (const b of breaks) {
+        const bKey = b.linkedKey ?? 'BREAK';
+        const existing = breakByKey.get(bKey) || { issueKey: bKey, summary: b.linkedSummary, totalSeconds: 0 };
+        existing.totalSeconds += b.seconds;
+        breakByKey.set(bKey, existing);
+      }
+      return {
+        dateKey: key,
+        dateLabel: dayLabel(key),
+        totalSeconds: [...taskMap.values()].reduce((s, t) => s + t.totalSeconds, 0) + breakSeconds,
+        breakSeconds,
+        tasks: [...taskMap.values()].sort((a, b) => b.totalSeconds - a.totalSeconds),
+        breakTasks: [...breakByKey.values()],
+      };
+    });
 }
 
 export function aggregateAnalytics(snapshot, nowIso) {
@@ -132,6 +157,8 @@ export function aggregateAnalytics(snapshot, nowIso) {
   }
 
   for (const session of sessions) {
+    if (session.issueKey === 'BREAK' || session.issueKey === 'LOCAL') continue;
+
     const sessionSeconds = session.segments.reduce(
       (acc, segment) => acc + segmentSeconds(segment, nowIso),
       0

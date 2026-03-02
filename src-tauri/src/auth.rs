@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use url::Url;
 
+const JIRA_CLIENT_ID: &str = env!("JIRA_CLIENT_ID");
+const JIRA_CLIENT_SECRET: &str = env!("JIRA_CLIENT_SECRET");
+const JIRA_REDIRECT_URI: &str = env!("JIRA_REDIRECT_URI");
+
 #[derive(Clone, Debug, Serialize)]
 pub struct AuthStatus {
     pub authorized: bool,
@@ -43,7 +47,7 @@ pub enum AuthorizationOutcome {
 }
 
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
+pub(crate) struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
 }
@@ -88,14 +92,12 @@ pub fn build_authorization_url(
 }
 
 pub fn authorization_url(state: &str) -> Result<String, String> {
-    let client_id = env::var("JIRA_CLIENT_ID")
-        .map_err(|_| "Missing JIRA_CLIENT_ID environment variable".to_string())?;
-    let redirect_uri = env::var("JIRA_REDIRECT_URI")
-        .map_err(|_| "Missing JIRA_REDIRECT_URI environment variable".to_string())?;
-    let scopes = env::var("JIRA_SCOPES")
-        .unwrap_or_else(|_| "read:jira-work read:jira-user offline_access".to_string());
-
-    build_authorization_url(&client_id, &redirect_uri, state, &scopes)
+    build_authorization_url(
+        JIRA_CLIENT_ID,
+        JIRA_REDIRECT_URI,
+        state,
+        "read:jira-work read:jira-user offline_access",
+    )
 }
 
 fn extract_code_with_expected_state(
@@ -144,18 +146,16 @@ fn format_send_error(context: &str, error: reqwest::Error) -> String {
     details
 }
 
-fn oauth_env() -> Result<(String, String, String), String> {
-    let client_id = env::var("JIRA_CLIENT_ID")
-        .map_err(|_| "Missing JIRA_CLIENT_ID environment variable".to_string())?;
-    let client_secret = env::var("JIRA_CLIENT_SECRET")
-        .map_err(|_| "Missing JIRA_CLIENT_SECRET environment variable".to_string())?;
-    let redirect_uri = env::var("JIRA_REDIRECT_URI")
-        .map_err(|_| "Missing JIRA_REDIRECT_URI environment variable".to_string())?;
-    Ok((client_id, client_secret, redirect_uri))
+fn oauth_env() -> (String, String, String) {
+    (
+        JIRA_CLIENT_ID.to_string(),
+        JIRA_CLIENT_SECRET.to_string(),
+        JIRA_REDIRECT_URI.to_string(),
+    )
 }
 
 fn exchange_code_for_token(code: &str) -> Result<TokenResponse, String> {
-    let (client_id, client_secret, redirect_uri) = oauth_env()?;
+    let (client_id, client_secret, redirect_uri) = oauth_env();
     let client = reqwest::blocking::Client::builder()
         .user_agent("Tracklet/0.1.0")
         .build()
@@ -188,6 +188,57 @@ fn exchange_code_for_token(code: &str) -> Result<TokenResponse, String> {
 
     serde_json::from_str(&body)
         .map_err(|error| format!("Failed to parse OAuth token response: {error}"))
+}
+
+pub fn refresh_access_token(refresh_token: &str) -> Result<TokenResponse, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Tracklet/0.1.0")
+        .build()
+        .map_err(|error| format!("Failed to create OAuth HTTP client: {error}"))?;
+
+    let response = client
+        .post("https://auth.atlassian.com/oauth/token")
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": JIRA_CLIENT_ID,
+            "client_secret": JIRA_CLIENT_SECRET,
+            "refresh_token": refresh_token
+        }))
+        .send()
+        .map_err(|error| format_send_error("Failed to refresh OAuth token", error))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("Failed to read OAuth token refresh response: {error}"))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "OAuth token refresh failed ({}): {}",
+            status.as_u16(),
+            summarize_error_body(&body)
+        ));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|error| format!("Failed to parse OAuth token refresh response: {error}"))
+}
+
+pub struct RefreshedTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+pub fn try_refresh_session(session: &JiraAuthSession) -> Result<RefreshedTokens, String> {
+    let rt = session
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| "No refresh token available".to_string())?;
+    let token = refresh_access_token(rt)?;
+    Ok(RefreshedTokens {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+    })
 }
 
 fn fetch_accessible_resources(access_token: &str) -> Result<Vec<AccessibleResource>, String> {

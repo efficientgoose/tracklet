@@ -382,8 +382,7 @@ fn begin_jira_authorization(state: State<'_, AppState>) -> Result<String, String
 
     let pending_state = format!("tracklet-{}", chrono::Utc::now().timestamp_millis());
     let authorize_url = auth::authorization_url(&pending_state)?;
-    let redirect_uri = std::env::var("JIRA_REDIRECT_URI")
-        .map_err(|_| "Missing JIRA_REDIRECT_URI environment variable".to_string())?;
+    let redirect_uri = env!("JIRA_REDIRECT_URI").to_string();
 
     {
         let mut callback_guard = state
@@ -611,11 +610,33 @@ fn fetch_assigned_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> 
         .expect("jira session lock poisoned")
         .clone();
 
-    let Some(session) = maybe_session else {
+    let Some(mut session) = maybe_session else {
         return Vec::new();
     };
 
-    match jira::fetch_assigned_not_done_issues(&session.access_token, &session.cloud_id) {
+    let result = jira::fetch_assigned_not_done_issues(&session.access_token, &session.cloud_id);
+
+    // On 401, try refreshing the token once and retry.
+    let result = match result {
+        Err(ref error) if error.contains("401") => {
+            match auth::try_refresh_session(&session) {
+                Ok(refreshed) => {
+                    session.access_token = refreshed.access_token.clone();
+                    if let Some(new_rt) = refreshed.refresh_token {
+                        session.refresh_token = Some(new_rt);
+                    }
+                    // Persist refreshed tokens.
+                    let _ = state.db.save_jira_session(&session);
+                    *state.jira_session.lock().expect("jira session lock poisoned") = Some(session.clone());
+                    jira::fetch_assigned_not_done_issues(&session.access_token, &session.cloud_id)
+                }
+                Err(_) => result,
+            }
+        }
+        other => other,
+    };
+
+    match result {
         Ok(issues) => {
             let mut sync_at_guard = state.last_sync_at.lock().expect("sync at lock poisoned");
             *sync_at_guard = Some(chrono::Utc::now().to_rfc3339());
