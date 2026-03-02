@@ -1,7 +1,7 @@
 import { Settings } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, Pause, Square, FastForward, RotateCcw, ChevronDown, Search, X as XIcon, Trash2, User, LogOut, Moon, Sun, ChevronsUp, ChevronUp, Equal, ChevronDown as ChevronDownIcon, ChevronsDown } from 'lucide-react';
+import { Play, Pause, Square, FastForward, RotateCcw, ChevronDown, Search, X as XIcon, Trash2, User, LogOut, Moon, Sun, ChevronsUp, ChevronUp, Equal, ChevronDown as ChevronDownIcon, ChevronsDown, Leaf } from 'lucide-react';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { format, startOfDay, subDays, isWithinInterval } from 'date-fns';
 import {
@@ -50,6 +50,12 @@ const LOCAL_FALLBACK_ISSUE = {
   issueId: 'local-session',
   issueKey: 'LOCAL',
   summary: 'Untitled Task'
+};
+
+const BREAK_ISSUE = {
+  issueId: 'break-session',
+  issueKey: 'BREAK',
+  summary: 'Break'
 };
 
 const MAX_MINUTES = 120;
@@ -185,12 +191,7 @@ function renderTrayTimerBadge(timerLabel: string, color: string) {
 }
 
 function logoClock() {
-  return (
-    <svg className="logo-clock" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <circle cx="7" cy="7" r="5.5" stroke="white" strokeWidth="1.5" />
-      <path d="M7 4.5V7.5L9 9" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+  return <Leaf size={14} fill="white" color="white" strokeWidth={0} aria-hidden="true" />;
 }
 
 const STATUS_MAP: Record<string, { text: string; color: string; bg: string }> = {
@@ -313,6 +314,7 @@ export default function App() {
   const autoStoppingRef = useRef(false);
   const lastCountdownTickMsRef = useRef<number | null>(null);
   const sleepTransitionInFlightRef = useRef(false);
+  const lastFocusIssueRef = useRef<{ issueKey: string; summary: string } | null>(null);
   const latestTrayLabelRef = useRef('');
   const activeCountdownTotalRef = useRef<number | null>(null);
   const ticketDropdownRef = useRef<HTMLDivElement | null>(null);
@@ -407,22 +409,50 @@ export default function App() {
     }
     const keyMap = new Map(dailyData.map((d, idx) => [d.key, idx]));
     for (const session of filteredSessions) {
+      const isBreak = (session as any).issueKey === 'BREAK';
       const totalSecs = (session as any).segments?.reduce((acc: number, seg: any) => {
         const end = seg.endedAt || seg.ended_at || nowIso;
         return acc + Math.max(0, Math.floor((new Date(end).getTime() - new Date(seg.startedAt || seg.started_at).getTime()) / 1000));
       }, 0) ?? 0;
       const dateKey = format(new Date((session as any).startedAt || (session as any).started_at), 'yyyy-MM-dd');
       const idx = keyMap.get(dateKey);
-      if (idx !== undefined) dailyData[idx].focus += totalSecs / 60;
+      if (idx !== undefined) {
+        if (isBreak) {
+          dailyData[idx].break += totalSecs / 60;
+        } else {
+          dailyData[idx].focus += totalSecs / 60;
+        }
+      }
     }
     return dailyData.map((d) => ({
       date: d.label, Focus: Math.round(d.focus), Break: Math.round(d.break),
     }));
   }, [filteredSessions, nowIso, days]);
 
-  const totalBreakSeconds = 0;
+  const totalBreakSeconds = useMemo(() => {
+    return allSessions
+      .filter((s: any) => s.issueKey === 'BREAK')
+      .reduce((acc: number, s: any) => {
+        return acc + (s.segments ?? []).reduce((a: number, seg: any) => {
+          const end = seg.endedAt || nowIso;
+          return a + Math.max(0, Math.floor((new Date(end).getTime() - new Date(seg.startedAt).getTime()) / 1000));
+        }, 0);
+      }, 0);
+  }, [allSessions, nowIso]);
+
+  const totalFocusSeconds = useMemo(() => {
+    return allSessions
+      .filter((s: any) => s.issueKey !== 'BREAK')
+      .reduce((acc: number, s: any) => {
+        return acc + (s.segments ?? []).reduce((a: number, seg: any) => {
+          const end = seg.endedAt || nowIso;
+          return a + Math.max(0, Math.floor((new Date(end).getTime() - new Date(seg.startedAt).getTime()) / 1000));
+        }, 0);
+      }, 0);
+  }, [allSessions, nowIso]);
+
   const pieData = [
-    { name: 'Focus', value: Math.round(totalTrackedSeconds / 60), color: '#007AFF' },
+    { name: 'Focus', value: Math.round(totalFocusSeconds / 60), color: '#007AFF' },
     { name: 'Break', value: Math.round(totalBreakSeconds / 60), color: '#34c759' },
   ];
 
@@ -466,7 +496,6 @@ export default function App() {
       const nowMs = Date.now();
       const previousTickMs = lastCountdownTickMsRef.current ?? nowMs;
       const gapMs = nowMs - previousTickMs;
-      lastCountdownTickMsRef.current = nowMs;
 
       if (gapMs > SLEEP_GAP_THRESHOLD_MS && !sleepTransitionInFlightRef.current) {
         const inferredSleepStartMs = previousTickMs + COUNTDOWN_TICK_MS;
@@ -485,13 +514,14 @@ export default function App() {
         })();
       }
 
-      setRemainingSeconds((current) => {
-        if (current === null) {
-          return null;
-        }
-
-        return Math.max(0, current - 1);
-      });
+      // Advance reference by exactly 1000ms per tick to avoid drift.
+      // Only decrement when a full second has elapsed since the last decrement.
+      if (gapMs >= 900) {
+        lastCountdownTickMsRef.current = (lastCountdownTickMsRef.current ?? nowMs) + 1000;
+        setRemainingSeconds((prev) => (prev === null ? null : Math.max(0, prev - 1)));
+      } else {
+        lastCountdownTickMsRef.current = nowMs;
+      }
     }, 1000);
 
     return () => {
@@ -864,7 +894,11 @@ export default function App() {
       return;
     }
 
-    const issueToStart = selectedIssue ?? LOCAL_FALLBACK_ISSUE;
+    const focusIssue = selectedIssue ?? LOCAL_FALLBACK_ISSUE;
+    const issueToStart = timerType === 'break' ? BREAK_ISSUE : focusIssue;
+    if (timerType !== 'break') {
+      lastFocusIssueRef.current = { issueKey: focusIssue.issueKey, summary: focusIssue.summary };
+    }
     await startTimer(issueToStart);
     await refreshSnapshot();
     activeCountdownTotalRef.current = totalInputSeconds;
@@ -1167,9 +1201,19 @@ export default function App() {
                         }}
                       />
                       <div style={{ minWidth: 0, flex: 1 }}>
-                        <p className="tracking-title" style={{ color: accentColor }}>Tracking</p>
+                        <p className="tracking-title" style={{ color: accentColor }}>
+                          {active.issueKey === 'BREAK' ? 'Break' : 'Tracking'}
+                        </p>
                         <p className="tracking-text">
-                          {active.issueKey !== 'LOCAL' && <>{active.issueKey} &middot; </>}{active.summary}
+                          {(() => {
+                            if (active.issueKey === 'BREAK') {
+                              const last = lastFocusIssueRef.current;
+                              if (last && last.issueKey !== 'LOCAL') return <>{last.issueKey} &middot; {last.summary}</>;
+                              if (last) return <>{last.summary}</>;
+                              return <>Break</>;
+                            }
+                            return <>{active.issueKey !== 'LOCAL' && <>{active.issueKey} &middot; </>}{active.summary}</>;
+                          })()}
                         </p>
                       </div>
                     </div>
@@ -1474,6 +1518,13 @@ export default function App() {
                             <span className="day-task-key">{task.issueKey}</span>
                             <span className="day-task-summary">{task.summary}</span>
                             <span className="day-task-time">{formatDuration(task.totalSeconds)}</span>
+                          </div>
+                        ))}
+                        {(day as any).breakTasks?.map((bt: any) => (
+                          <div key={`break-${bt.issueKey}`} className="day-task-row">
+                            <span className="day-task-key" style={{ color: '#34c759' }}>{bt.issueKey}</span>
+                            <span className="day-task-summary" style={{ color: 'var(--text-muted)' }}>{bt.summary ?? 'Break'}</span>
+                            <span className="day-task-time">{formatDuration(bt.totalSeconds)}</span>
                           </div>
                         ))}
                       </div>
