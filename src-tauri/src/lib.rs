@@ -11,16 +11,16 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::Emitter;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 use timer_engine::TimerEngine;
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const MAIN_WINDOW_WIDTH: f64 = 450.0;
-const MAIN_WINDOW_HEIGHT: f64 = 486.0;
+const MAIN_WINDOW_WIDTH: f64 = 368.0;
+const MAIN_WINDOW_HEIGHT: f64 = 520.0;
 
-#[derive(Default)]
 struct AppState {
     timer: Mutex<TimerEngine>,
     oauth_state: Mutex<Option<String>>,
@@ -30,6 +30,7 @@ struct AppState {
     pending_site_selection: Mutex<Option<auth::PendingSiteSelection>>,
     last_sync_at: Mutex<Option<String>>,
     last_sync_error: Mutex<Option<String>>,
+    db: Arc<db::Db>,
 }
 
 #[derive(Debug, Serialize)]
@@ -453,8 +454,9 @@ fn complete_jira_authorization(
                     .jira_session
                     .lock()
                     .expect("jira session lock poisoned");
-                *session_guard = Some(session);
+                *session_guard = Some(session.clone());
             }
+            let _ = state.db.save_jira_session(&session);
             {
                 let mut pending_site_guard = state
                     .pending_site_selection
@@ -481,8 +483,9 @@ fn complete_jira_authorization(
                             .jira_session
                             .lock()
                             .expect("jira session lock poisoned");
-                        *session_guard = Some(session);
+                        *session_guard = Some(session.clone());
                     }
+                    let _ = state.db.save_jira_session(&session);
                     {
                         let mut pending_site_guard = state
                             .pending_site_selection
@@ -579,8 +582,9 @@ fn select_jira_site(
             .jira_session
             .lock()
             .expect("jira session lock poisoned");
-        *session_guard = Some(session);
+        *session_guard = Some(session.clone());
     }
+    let _ = state.db.save_jira_session(&session);
     {
         let mut pending_site_guard = state
             .pending_site_selection
@@ -620,6 +624,12 @@ fn fetch_assigned_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> 
                 .lock()
                 .expect("sync error lock poisoned");
             *sync_error_guard = None;
+
+            // Cache issues in the background
+            if let Some(account_id) = &session.account_id {
+                let _ = state.db.save_jira_issues(&issues, account_id);
+            }
+
             issues
         }
         Err(error) => {
@@ -631,6 +641,42 @@ fn fetch_assigned_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> 
             Vec::new()
         }
     }
+}
+
+#[tauri::command]
+fn get_cached_issues(state: State<'_, AppState>) -> Vec<jira::IssueSummary> {
+    let maybe_session = state
+        .jira_session
+        .lock()
+        .expect("jira session lock poisoned")
+        .clone();
+
+    if let Some(session) = maybe_session {
+        if let Some(account_id) = session.account_id {
+            return state.db.get_jira_issues(&account_id).unwrap_or_default();
+        }
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+fn jira_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state.db.clear_jira_sessions();
+    {
+        let mut session_guard = state
+            .jira_session
+            .lock()
+            .expect("jira session lock poisoned");
+        *session_guard = None;
+    }
+    {
+        let mut pending_guard = state
+            .pending_site_selection
+            .lock()
+            .expect("pending site selection lock poisoned");
+        *pending_guard = None;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -646,6 +692,8 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
             ok: false,
             error: Some("Select Jira site to finish authorization".to_string()),
             last_synced_at: None,
+            account_name: None,
+            avatar_url: None,
         };
     }
 
@@ -660,6 +708,8 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
             ok: false,
             error: Some("Not authorized with Jira".to_string()),
             last_synced_at: None,
+            account_name: None,
+            avatar_url: None,
         };
     }
 
@@ -674,11 +724,21 @@ fn jira_sync_status(state: State<'_, AppState>) -> jira::SyncStatus {
         .expect("sync at lock poisoned")
         .clone();
 
+    let (account_name, avatar_url) = {
+        let session = state.jira_session.lock().unwrap();
+        (
+            session.as_ref().and_then(|s| s.account_name.clone()),
+            session.as_ref().and_then(|s| s.avatar_url.clone()),
+        )
+    };
+
     jira::SyncStatus {
         authorized: true,
         ok: error.is_none(),
         error,
         last_synced_at,
+        account_name,
+        avatar_url,
     }
 }
 
@@ -764,31 +824,68 @@ fn timer_snapshot(state: State<'_, AppState>) -> TimerSnapshot {
 }
 
 #[tauri::command]
-fn start_timer(state: State<'_, AppState>, issue: JiraIssue, at: String) -> TimerSnapshot {
-    let mut guard = state.timer.lock().expect("timer lock poisoned");
-    guard.start(issue, &at)
+fn start_timer(app: tauri::AppHandle, state: State<'_, AppState>, issue: JiraIssue, at: String) -> TimerSnapshot {
+    let snapshot = {
+        let mut guard = state.timer.lock().expect("timer lock poisoned");
+        guard.start(issue, &at)
+    };
+    if let Some(session) = &snapshot.active_session {
+        let _ = state.db.upsert_session(session);
+        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+    }
+    update_tray_menu(&app, &snapshot);
+    let _ = app.emit("timer-state-changed", ());
+    snapshot
 }
 
 #[tauri::command]
 fn pause_timer(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     at: String,
     reason: String,
 ) -> Result<TimerSnapshot, String> {
-    let mut guard = state.timer.lock().expect("timer lock poisoned");
-    guard.pause(&at, &reason).map_err(|error| error.to_string())
+    let snapshot = {
+        let mut guard = state.timer.lock().expect("timer lock poisoned");
+        guard.pause(&at, &reason).map_err(|error| error.to_string())?
+    };
+    if let Some(session) = &snapshot.active_session {
+        let _ = state.db.upsert_session(session);
+        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+    }
+    update_tray_menu(&app, &snapshot);
+    let _ = app.emit("timer-state-changed", ());
+    Ok(snapshot)
 }
 
 #[tauri::command]
-fn resume_timer(state: State<'_, AppState>, at: String) -> Result<TimerSnapshot, String> {
-    let mut guard = state.timer.lock().expect("timer lock poisoned");
-    guard.resume(&at).map_err(|error| error.to_string())
+fn resume_timer(app: tauri::AppHandle, state: State<'_, AppState>, at: String) -> Result<TimerSnapshot, String> {
+    let snapshot = {
+        let mut guard = state.timer.lock().expect("timer lock poisoned");
+        guard.resume(&at).map_err(|error| error.to_string())?
+    };
+    if let Some(session) = &snapshot.active_session {
+        let _ = state.db.upsert_session(session);
+        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+    }
+    update_tray_menu(&app, &snapshot);
+    let _ = app.emit("timer-state-changed", ());
+    Ok(snapshot)
 }
 
 #[tauri::command]
-fn stop_timer(state: State<'_, AppState>, at: String, reason: String) -> TimerSnapshot {
-    let mut guard = state.timer.lock().expect("timer lock poisoned");
-    guard.stop(&at, &reason)
+fn stop_timer(app: tauri::AppHandle, state: State<'_, AppState>, at: String, reason: String) -> TimerSnapshot {
+    let snapshot = {
+        let mut guard = state.timer.lock().expect("timer lock poisoned");
+        guard.stop(&at, &reason)
+    };
+    if let Some(session) = snapshot.completed_sessions.last() {
+        let _ = state.db.upsert_session(session);
+        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+    }
+    update_tray_menu(&app, &snapshot);
+    let _ = app.emit("timer-state-changed", ());
+    snapshot
 }
 
 #[tauri::command]
@@ -900,29 +997,178 @@ fn load_env_file() {
     }
 }
 
+fn update_tray_menu(app: &tauri::AppHandle, snapshot: &TimerSnapshot) {
+    let Some(tray) = app.tray_by_id("main") else { return; };
+
+    let Ok(open) = MenuItem::with_id(app, "open", "Open Tracklet", true, None::<&str>) else { return; };
+    let Ok(quit) = MenuItem::with_id(app, "quit", "Quit Tracklet", true, None::<&str>) else { return; };
+
+    let active_state = snapshot.active_session.as_ref().map(|s| &s.state);
+
+    let menu = match active_state {
+        Some(state) if *state == models::TimerState::Running => {
+            if let (Ok(pause_item), Ok(stop_item), Ok(sep)) = (
+                MenuItem::with_id(app, "timer_pause", "Pause Timer", true, None::<&str>),
+                MenuItem::with_id(app, "timer_stop", "Stop Timer", true, None::<&str>),
+                PredefinedMenuItem::separator(app),
+            ) {
+                Menu::with_items(app, &[&pause_item, &stop_item, &sep, &open, &quit]).ok()
+            } else {
+                Menu::with_items(app, &[&open, &quit]).ok()
+            }
+        }
+        Some(state) if *state == models::TimerState::Paused => {
+            if let (Ok(resume_item), Ok(stop_item), Ok(sep)) = (
+                MenuItem::with_id(app, "timer_resume", "Resume Timer", true, None::<&str>),
+                MenuItem::with_id(app, "timer_stop", "Stop Timer", true, None::<&str>),
+                PredefinedMenuItem::separator(app),
+            ) {
+                Menu::with_items(app, &[&resume_item, &stop_item, &sep, &open, &quit]).ok()
+            } else {
+                Menu::with_items(app, &[&open, &quit]).ok()
+            }
+        }
+        _ => Menu::with_items(app, &[&open, &quit]).ok(),
+    };
+
+    if let Some(menu) = menu {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
 pub fn run() {
     load_env_file();
 
+    let app_data_dir = std::env::current_dir().unwrap_or_default(); // Fallback for simple dev
+    let db_path = app_data_dir.join("tracklet.db");
+    
+    let database = db::Db::open(&db_path).expect("failed to open database");
+    database.migrate().expect("failed to run migrations");
+    
+    let initial_session = database.get_selected_jira_session().unwrap_or(None);
+
+    // Restore persisted sessions into the timer engine
+    let all_sessions = database.load_all_sessions().unwrap_or_default();
+    let mut active_session = None;
+    let mut completed_sessions = Vec::new();
+    for session in all_sessions {
+        match session.state {
+            models::TimerState::Stopped | models::TimerState::Idle => completed_sessions.push(session),
+            models::TimerState::Running | models::TimerState::Paused => {
+                active_session = Some(session);
+            }
+        }
+    }
+    let initial_snapshot = models::TimerSnapshot { active_session, completed_sessions };
+
+    let db_arc = Arc::new(database);
+
     tauri::Builder::default()
         .enable_macos_default_menu(false)
-        .manage(AppState::default())
+        .manage(AppState {
+            timer: Mutex::new(TimerEngine::with_snapshot(initial_snapshot)),
+            oauth_state: Mutex::new(None),
+            oauth_callback_url: Arc::new(Mutex::new(None)),
+            oauth_callback_error: Arc::new(Mutex::new(None)),
+            jira_session: Mutex::new(initial_session),
+            pending_site_selection: Mutex::new(None),
+            last_sync_at: Mutex::new(None),
+            last_sync_error: Mutex::new(None),
+            db: db_arc,
+        })
         .setup(|app| {
+            // Re-open DB with proper app data path if possible
+            if let Ok(path) = app.path().app_data_dir() {
+                if !path.exists() {
+                    let _ = std::fs::create_dir_all(&path);
+                }
+                // In a real app we'd migrate here or use a persistent path.
+                // For now, tracklet.db in CWD is fine for dev.
+            }
             ensure_main_window(&app.handle());
-            if let Some(tray) = app.tray_by_id("main") {
-                if let (Ok(open), Ok(quit)) = (
-                    MenuItem::with_id(app, "open", "Open Tracklet Window", true, None::<&str>),
-                    MenuItem::with_id(app, "quit", "Quit Tracklet", true, None::<&str>),
-                ) {
-                    if let Ok(menu) = Menu::with_items(app, &[&open, &quit]) {
-                        let _ = tray.set_menu(Some(menu));
-                    }
+            
+            // Proactively refresh avatar if missing
+            let handle = app.handle().clone();
+            let session_opt = handle.state::<AppState>().jira_session.lock().unwrap().clone();
+            if let Some(session) = session_opt {
+                if session.avatar_url.is_none() || session.account_name.is_none() {
+                    std::thread::spawn(move || {
+                        let (_account_id, account_name, avatar_url) = crate::auth::fetch_user_details(&session.access_token);
+                        let (_account_id, account_name, avatar_url) = if account_name.is_none() {
+                            crate::auth::fetch_user_details_from_site(&session.access_token, &session.cloud_id)
+                        } else {
+                            (_account_id, account_name, avatar_url)
+                        };
+
+                        if avatar_url.is_some() || account_name.is_some() {
+                            let mut session = session.clone();
+                            if avatar_url.is_some() { session.avatar_url = avatar_url; }
+                            if account_name.is_some() { session.account_name = account_name; }
+                            
+                            let state = handle.state::<AppState>();
+                            // Update DB
+                            let _ = state.db.save_jira_session(&session);
+                            
+                            // Update State
+                            let mut state_session = state.jira_session.lock().unwrap();
+                            *state_session = Some(session);
+                        }
+                    });
                 }
             }
+            let snapshot = app.state::<AppState>().timer.lock().unwrap().snapshot();
+            update_tray_menu(&app.handle(), &snapshot);
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
             "quit" => app.exit(0),
+            "timer_pause" => {
+                let state = app.state::<AppState>();
+                let at = chrono::Utc::now().to_rfc3339();
+                let snapshot_opt = {
+                    let mut guard = state.timer.lock().expect("timer lock poisoned");
+                    guard.pause(&at, "tray_pause").ok()
+                };
+                if let Some(snapshot) = snapshot_opt {
+                    if let Some(session) = &snapshot.active_session {
+                        let _ = state.db.upsert_session(session);
+                        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+                    }
+                    update_tray_menu(app, &snapshot);
+                    let _ = app.emit("timer-state-changed", ());
+                }
+            }
+            "timer_resume" => {
+                let state = app.state::<AppState>();
+                let at = chrono::Utc::now().to_rfc3339();
+                let snapshot_opt = {
+                    let mut guard = state.timer.lock().expect("timer lock poisoned");
+                    guard.resume(&at).ok()
+                };
+                if let Some(snapshot) = snapshot_opt {
+                    if let Some(session) = &snapshot.active_session {
+                        let _ = state.db.upsert_session(session);
+                        let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+                    }
+                    update_tray_menu(app, &snapshot);
+                    let _ = app.emit("timer-state-changed", ());
+                }
+            }
+            "timer_stop" => {
+                let state = app.state::<AppState>();
+                let at = chrono::Utc::now().to_rfc3339();
+                let snapshot = {
+                    let mut guard = state.timer.lock().expect("timer lock poisoned");
+                    guard.stop(&at, "tray_stop")
+                };
+                if let Some(session) = snapshot.completed_sessions.last() {
+                    let _ = state.db.upsert_session(session);
+                    let _ = state.db.upsert_session_segments(&session.session_id, &session.segments);
+                }
+                update_tray_menu(app, &snapshot);
+                let _ = app.emit("timer-state-changed", ());
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -944,6 +1190,8 @@ pub fn run() {
             wait_for_oauth_callback,
             oauth_callback_status,
             fetch_assigned_issues,
+            get_cached_issues,
+            jira_disconnect,
             jira_sync_status,
             timer_snapshot,
             start_timer,

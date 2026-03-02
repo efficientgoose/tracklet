@@ -16,7 +16,8 @@ export function normalizeIssue(raw) {
     issueId: String(raw.id ?? raw.issueId ?? ''),
     issueKey: String(raw.key ?? raw.issueKey ?? ''),
     summary: String(raw.fields?.summary ?? raw.summary ?? ''),
-    statusCategory: String(raw.fields?.status?.statusCategory?.name ?? raw.statusCategory ?? 'Unknown')
+    statusCategory: String(raw.fields?.status?.statusCategory?.name ?? raw.statusCategory ?? 'Unknown'),
+    priority: raw.fields?.priority?.name ?? raw.priority ?? null
   };
 }
 
@@ -25,7 +26,9 @@ export function coerceSyncStatus(raw) {
     authorized: raw?.authorized ?? false,
     ok: raw?.ok ?? true,
     error: raw?.error ?? null,
-    lastSyncedAt: raw?.lastSyncedAt ?? raw?.last_synced_at ?? null
+    lastSyncedAt: raw?.lastSyncedAt ?? raw?.last_synced_at ?? null,
+    accountName: raw?.accountName ?? raw?.account_name ?? null,
+    avatarUrl: raw?.avatarUrl ?? raw?.avatar_url ?? null
   };
 }
 
@@ -90,6 +93,10 @@ async function invokeOrMock(command, args = {}) {
     };
   }
 
+  if (command === 'get_cached_issues') {
+    return [];
+  }
+
   if (command === 'begin_jira_authorization') {
     return 'https://auth.atlassian.com/authorize';
   }
@@ -128,6 +135,10 @@ async function invokeOrMock(command, args = {}) {
       callback_url: null,
       error: null
     };
+  }
+
+  if (command === 'jira_disconnect') {
+    return null;
   }
 
   if (command === 'open_external_url') {
@@ -185,9 +196,27 @@ export async function fetchAssignedIssues() {
       id: issue.issue_id ?? issue.issueId,
       key: issue.issue_key ?? issue.issueKey,
       summary: issue.summary,
-      statusCategory: issue.status_category ?? issue.statusCategory
+      statusCategory: issue.status_category ?? issue.statusCategory,
+      priority: issue.priority ?? null
     })
   );
+}
+
+export async function getCachedIssues() {
+  const issues = await invokeOrMock('get_cached_issues');
+  return (issues ?? []).map((issue) =>
+    normalizeIssue({
+      id: issue.issue_id ?? issue.issueId,
+      key: issue.issue_key ?? issue.issueKey,
+      summary: issue.summary,
+      statusCategory: issue.status_category ?? issue.statusCategory,
+      priority: issue.priority ?? null
+    })
+  );
+}
+
+export async function disconnectJira() {
+  return invokeOrMock('jira_disconnect');
 }
 
 export async function getSyncStatus() {

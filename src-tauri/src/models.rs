@@ -15,6 +15,30 @@ pub enum TimerState {
     Stopped,
 }
 
+impl std::fmt::Display for TimerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimerState::Idle => write!(f, "Idle"),
+            TimerState::Running => write!(f, "Running"),
+            TimerState::Paused => write!(f, "Paused"),
+            TimerState::Stopped => write!(f, "Stopped"),
+        }
+    }
+}
+
+impl std::str::FromStr for TimerState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Idle" => Ok(TimerState::Idle),
+            "Running" => Ok(TimerState::Running),
+            "Paused" => Ok(TimerState::Paused),
+            "Stopped" => Ok(TimerState::Stopped),
+            _ => Err(format!("Unknown TimerState: {s}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSegment {
     pub started_at: String,
