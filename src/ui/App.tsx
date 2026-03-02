@@ -1,7 +1,7 @@
 import { Settings } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, Pause, Square, RotateCcw, ChevronDown, Search, X as XIcon, Trash2, User } from 'lucide-react';
+import { Play, Pause, Square, FastForward, RotateCcw, ChevronDown, Search, X as XIcon, Trash2, User, LogOut, Moon, Sun, ChevronsUp, ChevronUp, Equal, ChevronDown as ChevronDownIcon, ChevronsDown } from 'lucide-react';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { format, startOfDay, subDays, isWithinInterval } from 'date-fns';
 import {
@@ -21,9 +21,10 @@ import {
   stopTimer,
   timerSnapshot,
   toErrorMessage,
+  disconnectJira,
   waitForAuthorizationCallback
 } from './api.js';
-import { aggregateAnalytics, formatDuration, normalizeSnapshot } from './state.js';
+import { aggregateAnalytics, aggregateByDay, formatDuration, normalizeSnapshot } from './state.js';
 
 type ActiveTab = 'timer' | 'analytics';
 
@@ -32,6 +33,7 @@ type Issue = {
   issueKey: string;
   summary: string;
   statusCategory: string;
+  priority: string | null;
 };
 
 type Snapshot = {
@@ -47,7 +49,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
 const LOCAL_FALLBACK_ISSUE = {
   issueId: 'local-session',
   issueKey: 'LOCAL',
-  summary: 'Local focus session'
+  summary: 'Untitled Task'
 };
 
 const MAX_MINUTES = 120;
@@ -60,6 +62,36 @@ const MENU_BADGE_HORIZONTAL_PADDING = 10;
 const MENU_BADGE_FONT = '600 16px "Inter"';
 const RING_RADIUS = 85;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+const FOCUS_QUOTES = [
+  "Don't give up.",
+  "Stay focused.",
+  "You got this.",
+  "Keep going.",
+  "One step at a time.",
+  "Make it count.",
+  "Push through.",
+  "Stay the course.",
+  "Deep work pays off.",
+  "Do it for future you.",
+  "Progress, not perfection.",
+  "Earned, not given.",
+];
+
+const BREAK_QUOTES = [
+  "Take a breath.",
+  "Rest up.",
+  "You earned it.",
+  "Step away.",
+  "Recharge.",
+  "Clear your mind.",
+  "Stretch a little.",
+  "Relax.",
+  "Good work.",
+  "Reset and return.",
+  "Rest is progress.",
+  "Enjoy the pause.",
+];
 
 function formatMinutesValue(value: number) {
   if (value < 10) {
@@ -161,6 +193,72 @@ function logoClock() {
   );
 }
 
+const STATUS_MAP: Record<string, { text: string; color: string; bg: string }> = {
+  'to do':        { text: 'To Do',        color: '#007AFF', bg: '#007AFF18' },
+  'open':         { text: 'Open',         color: '#007AFF', bg: '#007AFF18' },
+  'backlog':      { text: 'Backlog',      color: '#007AFF', bg: '#007AFF18' },
+  'in progress':  { text: 'In Progress',  color: '#f9a825', bg: '#f9a82518' },
+  'in review':    { text: 'In Review',    color: '#9b59b6', bg: '#9b59b618' },
+  'uat':          { text: 'UAT',          color: '#27ae60', bg: '#27ae6018' },
+  'rfq':          { text: 'RFQ',          color: '#27ae60', bg: '#27ae6018' },
+  'verified':     { text: 'Verified',     color: '#27ae60', bg: '#27ae6018' },
+  'ready for qa': { text: 'Ready for QA', color: '#9b59b6', bg: '#9b59b618' },
+  'in testing':   { text: 'In Testing',   color: '#9b59b6', bg: '#9b59b618' },
+  'code review':  { text: 'Code Review',  color: '#9b59b6', bg: '#9b59b618' },
+  'blocked':      { text: 'Blocked',      color: '#ff3b30', bg: '#ff3b3018' },
+  'on hold':      { text: 'On Hold',      color: '#ff3b30', bg: '#ff3b3018' },
+  'hold':         { text: 'Hold',         color: '#ff3b30', bg: '#ff3b3018' },
+  'done':         { text: 'Done',         color: '#34c759', bg: '#34c75918' },
+  'closed':       { text: 'Closed',       color: '#34c759', bg: '#34c75918' },
+  'resolved':     { text: 'Resolved',     color: '#34c759', bg: '#34c75918' },
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const entry = STATUS_MAP[status.toLowerCase()] ?? { text: status, color: '#636366', bg: '#63636618' };
+  return (
+    <span style={{
+      fontSize: 9,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      padding: '2px 6px',
+      borderRadius: 5,
+      background: entry.bg,
+      color: entry.color,
+      whiteSpace: 'nowrap',
+    }}>
+      {entry.text}
+    </span>
+  );
+}
+
+const PRIORITY_MAP: Record<string, { icon: React.ReactNode; bg: string }> = {
+  highest: { icon: <ChevronsUp    size={12} color="#d32f2f" strokeWidth={2.5} />, bg: '#d32f2f15' },
+  high:    { icon: <ChevronUp     size={12} color="#e57373" strokeWidth={2.5} />, bg: '#e5737315' },
+  medium:  { icon: <Equal         size={12} color="#f9a825" strokeWidth={2.5} />, bg: '#f9a82515' },
+  low:     { icon: <ChevronDownIcon size={12} color="#42a5f5" strokeWidth={2.5} />, bg: '#42a5f515' },
+  lowest:  { icon: <ChevronsDown  size={12} color="#1565c0" strokeWidth={2.5} />, bg: '#1565c015' },
+};
+
+function PriorityIcon({ priority }: { priority: string | null }) {
+  if (!priority) return null;
+  const entry = PRIORITY_MAP[priority.toLowerCase()];
+  if (!entry) return null;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 22,
+      height: 22,
+      borderRadius: 6,
+      background: entry.bg,
+      flexShrink: 0,
+    }}>
+      {entry.icon}
+    </span>
+  );
+}
+
 export default function App() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
@@ -168,20 +266,41 @@ export default function App() {
   const [selectedIssueId, setSelectedIssueId] = useState('');
   const [ticketSearch, setTicketSearch] = useState('');
   const [isTicketDropdownOpen, setIsTicketDropdownOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [syncMessage, setSyncMessage] = useState('Sync: Not authorized with Jira');
   const [syncWarning, setSyncWarning] = useState(false);
   const [authInProgress, setAuthInProgress] = useState(false);
   const [awaitingCallback, setAwaitingCallback] = useState(false);
   const [jiraAuthorized, setJiraAuthorized] = useState(false);
   const [nowIso, setNowIso] = useState(new Date().toISOString());
-  const [durationMinutes, setDurationMinutes] = useState('25');
+  const [quoteIndex, setQuoteIndex] = useState(() => Math.floor(Math.random() * FOCUS_QUOTES.length));
+  const [breakQuoteIndex, setBreakQuoteIndex] = useState(() => Math.floor(Math.random() * BREAK_QUOTES.length));
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('tracklet.darkMode');
+    if (saved !== null) return saved === 'true';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+  const [durationMinutes, setDurationMinutes] = useState(() => {
+    const saved = localStorage.getItem('tracklet.focusDuration');
+    const parsed = saved ? Number.parseInt(saved, 10) : NaN;
+    const minutes = Number.isFinite(parsed) && parsed >= 1 && parsed <= MAX_MINUTES ? parsed : 25;
+    return formatMinutesValue(minutes);
+  });
   const [durationSeconds, setDurationSeconds] = useState('00');
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isCountdownRunning, setIsCountdownRunning] = useState(false);
   const [isTrayFontReady, setIsTrayFontReady] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [focusDurationMinutes, setFocusDurationMinutes] = useState(25);
-  const [breakDurationMinutes, setBreakDurationMinutes] = useState(5);
+  const [focusDurationMinutes, setFocusDurationMinutes] = useState(() => {
+    const saved = localStorage.getItem('tracklet.focusDuration');
+    const parsed = saved ? Number.parseInt(saved, 10) : NaN;
+    return Number.isFinite(parsed) && parsed >= 1 && parsed <= MAX_MINUTES ? parsed : 25;
+  });
+  const [breakDurationMinutes, setBreakDurationMinutes] = useState(() => {
+    const saved = localStorage.getItem('tracklet.breakDuration');
+    const parsed = saved ? Number.parseInt(saved, 10) : NaN;
+    return Number.isFinite(parsed) && parsed >= 1 && parsed <= 60 ? parsed : 5;
+  });
   const [autoStartBreak, setAutoStartBreak] = useState(false);
   const [autoStartFocus, setAutoStartFocus] = useState(false);
   const [timerType, setTimerType] = useState<'focus' | 'break'>('focus');
@@ -189,6 +308,7 @@ export default function App() {
   const [isFetchingIssues, setIsFetchingIssues] = useState(false);
   const [jiraAvatarUrl, setJiraAvatarUrl] = useState<string | null>(null);
   const [jiraAccountName, setJiraAccountName] = useState<string | null>(null);
+  const [isAvatarMenuOpen, setIsAvatarMenuOpen] = useState(false);
 
   const autoStoppingRef = useRef(false);
   const lastCountdownTickMsRef = useRef<number | null>(null);
@@ -196,21 +316,48 @@ export default function App() {
   const latestTrayLabelRef = useRef('');
   const activeCountdownTotalRef = useRef<number | null>(null);
   const ticketDropdownRef = useRef<HTMLDivElement | null>(null);
+  const avatarMenuRef = useRef<HTMLDivElement | null>(null);
+  const ticketOptionsRef = useRef<HTMLDivElement | null>(null);
 
   const accentColor = timerType === 'focus' ? '#007AFF' : '#34c759';
 
   const selectedIssue = useMemo(() => issues.find((issue) => issue.issueId === selectedIssueId) ?? null, [issues, selectedIssueId]);
   const filteredIssues = useMemo(() => {
-    const query = ticketSearch.trim().toLowerCase();
-    if (!query) {
-      return issues;
-    }
+    const STATUS_ORDER: Record<string, number> = {
+      'in progress':  0,
+      'to do':        1,
+      'open':         1,
+      'backlog':      1,
+      'in review':    2,
+      'ready for qa': 3,
+      'uat':          4,
+      'verified':     5,
+    };
 
-    return issues.filter((issue) => {
-      const label = `${issue.issueKey} ${issue.summary}`.toLowerCase();
-      return label.includes(query);
+    const query = ticketSearch.trim().toLowerCase();
+    const filtered = query
+      ? issues.filter((issue) => `${issue.issueKey} ${issue.summary}`.toLowerCase().includes(query))
+      : issues;
+
+    return [...filtered].sort((a, b) => {
+      const aOrder = STATUS_ORDER[a.statusCategory.toLowerCase()] ?? 99;
+      const bOrder = STATUS_ORDER[b.statusCategory.toLowerCase()] ?? 99;
+      return aOrder - bOrder;
     });
   }, [issues, ticketSearch]);
+
+  // Reset highlight to first item whenever the filtered list or dropdown state changes
+  useEffect(() => {
+    setHighlightedIndex(0);
+  }, [filteredIssues, isTicketDropdownOpen]);
+
+  // Scroll highlighted item into view
+  useEffect(() => {
+    const container = ticketOptionsRef.current;
+    if (!container) return;
+    const item = container.children[highlightedIndex] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: 'nearest' });
+  }, [highlightedIndex]);
 
   const analyticsRows = useMemo(() => aggregateAnalytics(snapshot, nowIso), [snapshot, nowIso]);
 
@@ -237,6 +384,7 @@ export default function App() {
 
   // Analytics chart data
   const days = timeRange === '7d' ? 7 : 30;
+  const dailyBreakdown = useMemo(() => aggregateByDay(snapshot, nowIso, days), [snapshot, nowIso, days]);
   const rangeStart = useMemo(() => startOfDay(subDays(new Date(), days)), [days]);
   const allSessions = useMemo(() => {
     const sessions = [...snapshot.completedSessions];
@@ -290,13 +438,12 @@ export default function App() {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (!ticketDropdownRef.current) {
-        return;
-      }
-
-      if (!ticketDropdownRef.current.contains(event.target as Node)) {
+      if (ticketDropdownRef.current && !ticketDropdownRef.current.contains(event.target as Node)) {
         setIsTicketDropdownOpen(false);
         setTicketSearch('');
+      }
+      if (avatarMenuRef.current && !avatarMenuRef.current.contains(event.target as Node)) {
+        setIsAvatarMenuOpen(false);
       }
     };
 
@@ -477,6 +624,60 @@ export default function App() {
     setSnapshot(normalizeSnapshot(await timerSnapshot()));
   }
 
+  useEffect(() => {
+    const tauriEvent = (globalThis as any)?.window?.__TAURI__?.event;
+    if (!tauriEvent) return;
+
+    let unlisten: (() => void) | null = null;
+    tauriEvent.listen('timer-state-changed', () => {
+      refreshSnapshot();
+    }).then((fn: () => void) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+    localStorage.setItem('tracklet.darkMode', String(isDarkMode));
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (localStorage.getItem('tracklet.darkMode') === null) {
+        setIsDarkMode(e.matches);
+      }
+    };
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('tracklet.focusDuration', String(focusDurationMinutes));
+  }, [focusDurationMinutes]);
+
+  useEffect(() => {
+    localStorage.setItem('tracklet.breakDuration', String(breakDurationMinutes));
+  }, [breakDurationMinutes]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setQuoteIndex((i) => (i + 1) % FOCUS_QUOTES.length);
+    }, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setBreakQuoteIndex((i) => (i + 1) % BREAK_QUOTES.length);
+    }, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
   async function refreshIssues() {
     const cached = await getCachedIssues();
     if (cached.length > 0) {
@@ -486,14 +687,16 @@ export default function App() {
     setIsFetchingIssues(true);
     try {
       const fetchedIssues = await fetchAssignedIssues();
-      setIssues(fetchedIssues);
-
-      setSelectedIssueId((current) => {
-        if (current && fetchedIssues.some((issue) => issue.issueId === current)) {
-          return current;
-        }
-        return '';
-      });
+      if (fetchedIssues.length > 0) {
+        setIssues(fetchedIssues);
+        setSelectedIssueId((current) => {
+          if (current && fetchedIssues.some((issue) => issue.issueId === current)) {
+            return current;
+          }
+          return '';
+        });
+      }
+      await refreshSyncStatus();
     } finally {
       setIsFetchingIssues(false);
     }
@@ -516,7 +719,9 @@ export default function App() {
           return;
         }
 
-        setIssues(fetchedIssues);
+        if (fetchedIssues.length > 0) {
+          setIssues(fetchedIssues);
+        }
       } catch (err) {
         console.error('Failed to fetch issues during bootstrap', err);
       } finally {
@@ -532,6 +737,18 @@ export default function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+    const id = setInterval(() => {
+      fetchAssignedIssues()
+        .then((fetched) => {
+          if (fetched.length > 0) setIssues(fetched);
+        })
+        .catch(() => {});
+    }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
   }, []);
 
   async function resolvePendingSiteSelection() {
@@ -659,18 +876,31 @@ export default function App() {
     if (!active) return;
     await stopTimer();
     await refreshSnapshot();
-  }
-
-  function handleResetDuration() {
-    if (active) {
-      return;
-    }
-
+    setIsCountdownRunning(false);
+    setRemainingSeconds(null);
+    activeCountdownTotalRef.current = null;
     const duration = timerType === 'focus' ? focusDurationMinutes : breakDurationMinutes;
     setDurationMinutes(formatMinutesValue(duration));
     setDurationSeconds('00');
+  }
+
+  async function handleSkipToNext() {
+    if (active) {
+      await stopTimer();
+      await refreshSnapshot();
+    }
+
+    setIsCountdownRunning(false);
     setRemainingSeconds(null);
     activeCountdownTotalRef.current = null;
+
+    const nextType = timerType === 'focus' ? 'break' : 'focus';
+    setTimerType(nextType);
+    setQuoteIndex(Math.floor(Math.random() * FOCUS_QUOTES.length));
+    setBreakQuoteIndex(Math.floor(Math.random() * BREAK_QUOTES.length));
+    const nextDuration = nextType === 'focus' ? focusDurationMinutes : breakDurationMinutes;
+    setDurationMinutes(formatMinutesValue(nextDuration));
+    setDurationSeconds('00');
   }
 
   function saveSettings() {
@@ -690,6 +920,21 @@ export default function App() {
 
   function handleClearAnalytics() {
     setSnapshot({ activeSession: snapshot.activeSession, completedSessions: [] });
+  }
+
+  async function handleDisconnect() {
+    try {
+      await disconnectJira();
+    } catch {
+      // Ignore — clear frontend state regardless
+    }
+    setJiraAuthorized(false);
+    setJiraAvatarUrl(null);
+    setJiraAccountName(null);
+    setIssues([]);
+    setSelectedIssueId('');
+    setIsAvatarMenuOpen(false);
+    setSyncMessage('');
   }
 
   return (
@@ -713,17 +958,65 @@ export default function App() {
               </button>
             )}
             {jiraAuthorized && (
-              <div className="header-avatar-container has-custom-tooltip">
-                {jiraAvatarUrl ? (
-                  <img src={jiraAvatarUrl} alt="User" className="user-avatar" />
-                ) : (
-                  <div className="user-avatar-fallback">
-                    <User size={12} color="#8e8e93" />
-                  </div>
-                )}
-                <div className="custom-tooltip">
-                  {jiraAccountName ? `Authorized as ${jiraAccountName}` : 'Authorized'}
-                </div>
+              <div className="avatar-menu-wrap" ref={avatarMenuRef}>
+                <button
+                  className="header-avatar-container has-custom-tooltip"
+                  type="button"
+                  onClick={() => setIsAvatarMenuOpen((open) => !open)}
+                >
+                  {jiraAvatarUrl ? (
+                    <img src={jiraAvatarUrl} alt="User" className="user-avatar" />
+                  ) : (
+                    <div className="user-avatar-fallback">
+                      <User size={12} color="#8e8e93" />
+                    </div>
+                  )}
+                  {jiraAccountName && !isAvatarMenuOpen && (
+                    <div className="custom-tooltip">Authorized as {jiraAccountName}</div>
+                  )}
+                </button>
+                <AnimatePresence>
+                  {isAvatarMenuOpen && (
+                    <motion.div
+                      className="avatar-dropdown"
+                      initial={{ opacity: 0, y: -4, scale: 0.96 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: -4, scale: 0.96 }}
+                      transition={{ duration: 0.12 }}
+                    >
+                      <button
+                        className="avatar-dropdown-item avatar-dropdown-item--neutral"
+                        type="button"
+                        onClick={(e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          const x = rect.left + rect.width / 2;
+                          const y = rect.top + rect.height / 2;
+                          const newDark = !isDarkMode;
+                          document.documentElement.style.setProperty('--vt-x', `${x}px`);
+                          document.documentElement.style.setProperty('--vt-y', `${y}px`);
+                          const startVT = (document as any).startViewTransition?.bind(document);
+                          if (!startVT) { setIsDarkMode(newDark); setIsAvatarMenuOpen(false); return; }
+                          startVT(() => {
+                            document.documentElement.setAttribute('data-theme', newDark ? 'dark' : 'light');
+                            setIsDarkMode(newDark);
+                            setIsAvatarMenuOpen(false);
+                          });
+                        }}
+                      >
+                        {isDarkMode ? <Sun size={12} /> : <Moon size={12} />}
+                        <span>{isDarkMode ? 'Light Mode' : 'Dark Mode'}</span>
+                      </button>
+                      <button
+                        className="avatar-dropdown-item"
+                        type="button"
+                        onClick={handleDisconnect}
+                      >
+                        <LogOut size={12} />
+                        <span>Logout</span>
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
             <button 
@@ -812,15 +1105,15 @@ export default function App() {
                 <div className="ring-labels">
                   <span className="ring-time">{formattedTime}</span>
                   <span className="ring-subtitle">
-                    {active ? 'Active session' : `${normalizedMinutes} min ${timerType}`}
+                    {timerType === 'focus' ? FOCUS_QUOTES[quoteIndex] : BREAK_QUOTES[breakQuoteIndex]}
                   </span>
                 </div>
               </div>
 
               {/* Timer actions */}
               <div className="timer-actions">
-                <button className="reset-btn" type="button" onClick={handleResetDuration} disabled={Boolean(active)} title="Reset">
-                  <RotateCcw size={14} />
+                <button className="reset-btn" type="button" onClick={() => void handleSkipToNext()} title={timerType === 'focus' ? 'Skip to Break' : 'Skip to Focus'}>
+                  <FastForward size={14} strokeWidth={2.5} fill="currentColor" />
                 </button>
                 <button
                   className="start-btn"
@@ -829,14 +1122,16 @@ export default function App() {
                   onClick={handlePrimaryTimerAction}
                   disabled={!active && !canStart}
                   style={{
-                    background: accentColor,
-                    boxShadow: (!active && !canStart) ? 'none' : `0 2px 8px ${accentColor}40`,
+                    ['--btn-accent' as any]: accentColor,
+                    background: `${accentColor}22`,
+                    color: accentColor,
+                    boxShadow: 'none',
                   }}
                 >
                   {active ? (
-                    active.state === 'Paused' ? <Play size={13} fill="white" strokeWidth={0} /> : <Pause size={13} fill="white" strokeWidth={0} />
+                    active.state === 'Paused' ? <Play size={13} fill={accentColor} strokeWidth={0} /> : <Pause size={13} fill={accentColor} strokeWidth={0} />
                   ) : (
-                    <Play size={13} fill="white" strokeWidth={0} />
+                    <Play size={13} fill={accentColor} strokeWidth={0} />
                   )}
                   {active ? (active.state === 'Paused' ? 'Resume' : 'Pause') : 'Start'}
                 </button>
@@ -849,12 +1144,13 @@ export default function App() {
 
               {/* Tracking card */}
               <AnimatePresence>
-                {active && selectedIssue ? (
+                {active ? (
                   <motion.div
                     initial={{ opacity: 0, y: 4, height: 0 }}
                     animate={{ opacity: 1, y: 0, height: 'auto' }}
-                    exit={{ opacity: 0, y: 4, height: 0 }}
-                    style={{ width: '100%' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.15 }}
+                    style={{ width: '100%', marginTop: 12 }}
                   >
                     <div
                       className="tracking-card"
@@ -873,7 +1169,7 @@ export default function App() {
                       <div style={{ minWidth: 0, flex: 1 }}>
                         <p className="tracking-title" style={{ color: accentColor }}>Tracking</p>
                         <p className="tracking-text">
-                          {selectedIssue.issueKey} &middot; {selectedIssue.summary}
+                          {active.issueKey !== 'LOCAL' && <>{active.issueKey} &middot; </>}{active.summary}
                         </p>
                       </div>
                     </div>
@@ -882,7 +1178,7 @@ export default function App() {
               </AnimatePresence>
 
               {/* Ticket dropdown */}
-              <div className="ticket-field" ref={ticketDropdownRef}>
+              {!active && <div className="ticket-field" ref={ticketDropdownRef}>
                 {!jiraAuthorized ? (
                   <button
                     className="ticket-trigger connect-ticket-btn"
@@ -900,7 +1196,7 @@ export default function App() {
                       type="button"
                       onClick={() => {
                         setIsTicketDropdownOpen((open) => !open);
-                        if (!isTicketDropdownOpen) {
+                        if (!isTicketDropdownOpen && issues.length === 0) {
                           void refreshIssues();
                         }
                       }}
@@ -957,18 +1253,49 @@ export default function App() {
                             <Search size={12} color="#aeaeb2" />
                             <input
                               className="ticket-search"
+                              style={{ flex: 1 }}
                               type="text"
                               value={ticketSearch}
                               onChange={(event) => setTicketSearch(event.target.value)}
                               placeholder="Search tickets..."
                               autoComplete="off"
                               autoCorrect="off"
+                              autoFocus
+                              onKeyDown={(event) => {
+                                if (event.key === 'ArrowDown') {
+                                  event.preventDefault();
+                                  setHighlightedIndex((i) => Math.min(i + 1, filteredIssues.length - 1));
+                                } else if (event.key === 'ArrowUp') {
+                                  event.preventDefault();
+                                  setHighlightedIndex((i) => Math.max(i - 1, 0));
+                                } else if (event.key === 'Enter') {
+                                  const issue = filteredIssues[highlightedIndex];
+                                  if (issue) {
+                                    setSelectedIssueId(issue.issueId);
+                                    setIsTicketDropdownOpen(false);
+                                    setTicketSearch('');
+                                  }
+                                } else if (event.key === 'Escape') {
+                                  setIsTicketDropdownOpen(false);
+                                }
+                              }}
                               autoCapitalize="off"
                               spellCheck="false"
                             />
+                            <button
+                              className="ticket-refresh-btn"
+                              type="button"
+                              title="Refresh tickets"
+                              disabled={isFetchingIssues}
+                              onClick={() => void refreshIssues()}
+                            >
+                              {isFetchingIssues
+                                ? <span className="loading-spinner mini" />
+                                : <RotateCcw size={11} strokeWidth={2.5} />}
+                            </button>
                           </div>
 
-                          <div className="ticket-options">
+                          <div className="ticket-options" ref={ticketOptionsRef}>
                             {isFetchingIssues && filteredIssues.length === 0 ? (
                               <div className="ticket-loading">
                                 <span className="loading-spinner" />
@@ -984,11 +1311,11 @@ export default function App() {
                                     <span>Refreshing...</span>
                                   </div>
                                 )}
-                                {filteredIssues.map((issue) => (
+                                {filteredIssues.map((issue, index) => (
                                   <button
                                     key={issue.issueId}
                                     type="button"
-                                    className={`ticket-option ${selectedIssueId === issue.issueId ? 'is-selected' : ''}`}
+                                    className={`ticket-option ${selectedIssueId === issue.issueId ? 'is-selected' : ''} ${highlightedIndex === index ? 'is-active' : ''}`}
                                     onClick={() => {
                                       setSelectedIssueId(issue.issueId);
                                       setIsTicketDropdownOpen(false);
@@ -998,11 +1325,14 @@ export default function App() {
                                     <span className="ticket-key">{issue.issueKey}</span>
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                       <span className="ticket-summary">{issue.summary}</span>
-                                      <p className="ticket-status">{issue.statusCategory}</p>
+                                      <p className="ticket-status"><StatusBadge status={issue.statusCategory} /></p>
                                     </div>
-                                    {selectedIssueId === issue.issueId && (
-                                      <span style={{ fontSize: 14, color: '#007AFF', flexShrink: 0, marginTop: 1 }}>&#10003;</span>
-                                    )}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                                      <PriorityIcon priority={issue.priority} />
+                                      {selectedIssueId === issue.issueId && (
+                                        <span style={{ fontSize: 14, color: '#007AFF' }}>&#10003;</span>
+                                      )}
+                                    </div>
                                   </button>
                                 ))}
                               </>
@@ -1017,7 +1347,7 @@ export default function App() {
                     </AnimatePresence>
                   </>
                 )}
-              </div>
+              </div>}
             </div>
           ) : (
             <div className="analytics-panel">
@@ -1089,8 +1419,8 @@ export default function App() {
                     {pieData.map((entry) => (
                       <div key={entry.name} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                         <div style={{ width: 7, height: 7, borderRadius: '50%', background: entry.color, flexShrink: 0 }} />
-                        <span style={{ fontSize: 11, color: '#636366' }}>{entry.name}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: '#1c1c1e', fontVariantNumeric: 'tabular-nums' }}>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{entry.name}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
                           {entry.value}m
                         </span>
                       </div>
@@ -1109,6 +1439,10 @@ export default function App() {
                         paddingAngle={3}
                         dataKey="value"
                         stroke="none"
+                        isAnimationActive={true}
+                        animationBegin={0}
+                        animationDuration={700}
+                        animationEasing="ease-out"
                       >
                         {pieData.map((entry, i) => (
                           <Cell key={i} fill={entry.color} />
@@ -1119,19 +1453,32 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Empty state */}
-              {analyticsRows.length === 0 && (
-                <div style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '20px 0',
-                  gap: 6,
-                }}>
+              {/* Daily breakdown */}
+              {dailyBreakdown.length === 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 0', gap: 6 }}>
                   <span style={{ fontSize: 28 }}>&#128202;</span>
                   <p style={{ fontSize: 13, fontWeight: 500, color: '#636366', margin: 0 }}>No sessions yet</p>
                   <p style={{ fontSize: 11, color: '#aeaeb2', margin: 0 }}>Complete a focus session to see analytics</p>
+                </div>
+              ) : (
+                <div className="daily-breakdown">
+                  {dailyBreakdown.map((day) => (
+                    <div key={day.dateKey} className="day-section">
+                      <div className="day-header">
+                        <span className="day-label">{day.dateLabel}</span>
+                        <span className="day-total">{formatDuration(day.totalSeconds)}</span>
+                      </div>
+                      <div className="day-tasks">
+                        {day.tasks.map((task) => (
+                          <div key={task.issueKey} className="day-task-row">
+                            <span className="day-task-key">{task.issueKey}</span>
+                            <span className="day-task-summary">{task.summary}</span>
+                            <span className="day-task-time">{formatDuration(task.totalSeconds)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -1233,7 +1580,7 @@ export default function App() {
                       <span>Break timer</span>
                         <div
                           className="toggle-track"
-                          style={{ background: autoStartBreak ? 'var(--brand)' : '#e5e5ea' }}
+                          style={{ background: autoStartBreak ? 'var(--brand)' : 'var(--toggle-off)' }}
                         >
                         <motion.div
                           className="toggle-thumb"
@@ -1250,7 +1597,7 @@ export default function App() {
                       <span>Focus timer</span>
                         <div
                           className="toggle-track"
-                          style={{ background: autoStartFocus ? 'var(--brand)' : '#e5e5ea' }}
+                          style={{ background: autoStartFocus ? 'var(--brand)' : 'var(--toggle-off)' }}
                         >
                         <motion.div
                           className="toggle-thumb"

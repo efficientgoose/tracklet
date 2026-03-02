@@ -6,6 +6,10 @@ pub struct TimerEngine {
 }
 
 impl TimerEngine {
+    pub fn with_snapshot(snapshot: TimerSnapshot) -> Self {
+        Self { snapshot }
+    }
+
     pub fn snapshot(&self) -> TimerSnapshot {
         self.snapshot.clone()
     }

@@ -6,6 +6,7 @@ pub struct IssueSummary {
     pub issue_key: String,
     pub summary: String,
     pub status_category: String,
+    pub priority: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,10 +35,17 @@ struct JiraSearchIssue {
 struct JiraSearchFields {
     summary: Option<String>,
     status: Option<JiraStatus>,
+    priority: Option<JiraPriority>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JiraPriority {
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct JiraStatus {
+    name: Option<String>,
     #[serde(rename = "statusCategory")]
     status_category: Option<JiraStatusCategory>,
 }
@@ -80,9 +88,12 @@ fn parse_issue_search_response(body: &str) -> Result<Vec<IssueSummary>, String> 
             status_category: issue
                 .fields
                 .status
-                .and_then(|status| status.status_category)
-                .and_then(|category| category.name)
+                .and_then(|status| {
+                    status.name
+                        .or_else(|| status.status_category.and_then(|c| c.name))
+                })
                 .unwrap_or_else(|| "Unknown".to_string()),
+            priority: issue.fields.priority.and_then(|p| p.name),
         })
         .collect())
 }
@@ -105,7 +116,7 @@ pub fn fetch_assigned_not_done_issues(
                 "jql",
                 "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
             ),
-            ("fields", "summary,status"),
+            ("fields", "summary,status,priority"),
             ("maxResults", "50"),
         ])
         .send()
@@ -141,6 +152,7 @@ mod tests {
               "fields": {
                 "summary": "Build tracker",
                 "status": {
+                  "name": "In Review",
                   "statusCategory": {
                     "name": "In Progress"
                   }
@@ -155,7 +167,7 @@ mod tests {
         assert_eq!(issues[0].issue_id, "10001");
         assert_eq!(issues[0].issue_key, "JIRA-123");
         assert_eq!(issues[0].summary, "Build tracker");
-        assert_eq!(issues[0].status_category, "In Progress");
+        assert_eq!(issues[0].status_category, "In Review");
     }
 
     #[test]

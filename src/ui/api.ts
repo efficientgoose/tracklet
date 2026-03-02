@@ -16,7 +16,8 @@ export function normalizeIssue(raw) {
     issueId: String(raw.id ?? raw.issueId ?? ''),
     issueKey: String(raw.key ?? raw.issueKey ?? ''),
     summary: String(raw.fields?.summary ?? raw.summary ?? ''),
-    statusCategory: String(raw.fields?.status?.statusCategory?.name ?? raw.statusCategory ?? 'Unknown')
+    statusCategory: String(raw.fields?.status?.statusCategory?.name ?? raw.statusCategory ?? 'Unknown'),
+    priority: raw.fields?.priority?.name ?? raw.priority ?? null
   };
 }
 
@@ -136,6 +137,10 @@ async function invokeOrMock(command, args = {}) {
     };
   }
 
+  if (command === 'jira_disconnect') {
+    return null;
+  }
+
   if (command === 'open_external_url') {
     return null;
   }
@@ -191,7 +196,8 @@ export async function fetchAssignedIssues() {
       id: issue.issue_id ?? issue.issueId,
       key: issue.issue_key ?? issue.issueKey,
       summary: issue.summary,
-      statusCategory: issue.status_category ?? issue.statusCategory
+      statusCategory: issue.status_category ?? issue.statusCategory,
+      priority: issue.priority ?? null
     })
   );
 }
@@ -203,9 +209,14 @@ export async function getCachedIssues() {
       id: issue.issue_id ?? issue.issueId,
       key: issue.issue_key ?? issue.issueKey,
       summary: issue.summary,
-      statusCategory: issue.status_category ?? issue.statusCategory
+      statusCategory: issue.status_category ?? issue.statusCategory,
+      priority: issue.priority ?? null
     })
   );
+}
+
+export async function disconnectJira() {
+  return invokeOrMock('jira_disconnect');
 }
 
 export async function getSyncStatus() {

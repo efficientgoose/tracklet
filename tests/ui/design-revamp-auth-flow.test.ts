@@ -17,5 +17,5 @@ test('settings modal is timer-only and does not include a Jira tab', () => {
   assert.match(script, /Duration/);
   assert.match(script, /Auto-start/);
   assert.doesNotMatch(script, /\(\['timer',\s*'jira'\]/);
-  assert.doesNotMatch(script, /API Token|Refresh Tickets|Disconnect/);
+  assert.doesNotMatch(script, /API Token|Refresh Tickets/);
 });

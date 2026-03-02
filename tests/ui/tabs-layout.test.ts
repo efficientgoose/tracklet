@@ -25,7 +25,6 @@ test('revamped app renders widget header and ring timer shell', () => {
 test('header switches between Jira chip and Connect Jira entry point by auth state', () => {
   const script = fs.readFileSync('src/ui/App.tsx', 'utf8');
 
-  assert.match(script, /jiraAuthorized\s*\?/);
-  assert.match(script, /className="jira-chip"/);
+  assert.match(script, /jiraAuthorized/);
   assert.match(script, /Connect Jira/);
 });

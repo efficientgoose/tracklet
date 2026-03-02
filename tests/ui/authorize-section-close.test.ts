@@ -7,7 +7,7 @@ test('header includes settings trigger and settings modal visibility state', () 
 
   assert.match(script, /isSettingsOpen/);
   assert.match(script, /setIsSettingsOpen\(true\)/);
-  assert.match(script, /className="settings-btn"/);
+  assert.match(script, /className="settings-btn/);
   assert.match(script, /className="settings-overlay"/);
 });
 
