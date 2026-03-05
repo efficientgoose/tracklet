@@ -313,6 +313,7 @@ export default function App() {
 
   const autoStoppingRef = useRef(false);
   const lastCountdownTickMsRef = useRef<number | null>(null);
+  const countdownEndMsRef = useRef(0);
   const sleepTransitionInFlightRef = useRef(false);
   const lastFocusIssueRef = useRef<{ issueKey: string; summary: string } | null>(null);
   const latestTrayLabelRef = useRef('');
@@ -457,14 +458,17 @@ export default function App() {
   ];
 
   useEffect(() => {
+    if (activeTab !== 'analytics') return;
+
+    setNowIso(new Date().toISOString());
     const pollHandle = setInterval(() => {
       setNowIso(new Date().toISOString());
-    }, 1000);
+    }, 10_000);
 
     return () => {
       clearInterval(pollHandle);
     };
-  }, []);
+  }, [activeTab]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -490,6 +494,8 @@ export default function App() {
       return;
     }
 
+    // Compute the wall-clock end time from the current remaining seconds.
+    countdownEndMsRef.current = Date.now() + (remainingSeconds ?? totalInputSeconds) * 1000;
     lastCountdownTickMsRef.current = Date.now();
 
     const tickHandle = setInterval(() => {
@@ -499,6 +505,9 @@ export default function App() {
 
       if (gapMs > SLEEP_GAP_THRESHOLD_MS && !sleepTransitionInFlightRef.current) {
         const inferredSleepStartMs = previousTickMs + COUNTDOWN_TICK_MS;
+        const sleepDurationMs = nowMs - inferredSleepStartMs;
+        // Timer should not count during sleep — push end time forward.
+        countdownEndMsRef.current += sleepDurationMs;
         sleepTransitionInFlightRef.current = true;
 
         void (async () => {
@@ -514,15 +523,11 @@ export default function App() {
         })();
       }
 
-      // Advance reference by exactly 1000ms per tick to avoid drift.
-      // Only decrement when a full second has elapsed since the last decrement.
-      if (gapMs >= 900) {
-        lastCountdownTickMsRef.current = (lastCountdownTickMsRef.current ?? nowMs) + 1000;
-        setRemainingSeconds((prev) => (prev === null ? null : Math.max(0, prev - 1)));
-      } else {
-        lastCountdownTickMsRef.current = nowMs;
-      }
-    }, 1000);
+      lastCountdownTickMsRef.current = nowMs;
+      // Derive remaining time from wall clock — immune to interval jitter.
+      const remaining = Math.max(0, Math.ceil((countdownEndMsRef.current - nowMs) / 1000));
+      setRemainingSeconds(remaining);
+    }, COUNTDOWN_TICK_MS);
 
     return () => {
       clearInterval(tickHandle);
@@ -1268,7 +1273,7 @@ export default function App() {
                               setSelectedIssueId('');
                             }}
                           >
-                            <XIcon size={9} color="#636366" />
+                            <XIcon size={9} color="#ffffff" />
                           </button>
                         )}
                         <ChevronDown
@@ -1631,7 +1636,7 @@ export default function App() {
                       <span>Break timer</span>
                         <div
                           className="toggle-track"
-                          style={{ background: autoStartBreak ? 'var(--brand)' : 'var(--toggle-off)' }}
+                          style={{ background: autoStartBreak ? 'var(--save-btn)' : 'var(--toggle-off)' }}
                         >
                         <motion.div
                           className="toggle-thumb"
@@ -1648,7 +1653,7 @@ export default function App() {
                       <span>Focus timer</span>
                         <div
                           className="toggle-track"
-                          style={{ background: autoStartFocus ? 'var(--brand)' : 'var(--toggle-off)' }}
+                          style={{ background: autoStartFocus ? 'var(--save-btn)' : 'var(--toggle-off)' }}
                         >
                         <motion.div
                           className="toggle-thumb"
