@@ -8,6 +8,7 @@ use base64::Engine;
 use models::{JiraIssue, TimerSnapshot};
 use serde::Serialize;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::image::Image;
@@ -31,6 +32,9 @@ struct AppState {
     last_sync_at: Mutex<Option<String>>,
     last_sync_error: Mutex<Option<String>>,
     db: Arc<db::Db>,
+    /// Unix-millis timestamp when the current countdown should reach zero.
+    /// 0 means no active countdown.
+    countdown_end_ms: Arc<AtomicI64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -954,6 +958,17 @@ fn set_tray_timer_badge(
     Ok(())
 }
 
+#[tauri::command]
+fn start_countdown(state: State<'_, AppState>, total_seconds: i64) {
+    let end_ms = chrono::Utc::now().timestamp_millis() + total_seconds * 1000;
+    state.countdown_end_ms.store(end_ms, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn stop_countdown(state: State<'_, AppState>) {
+    state.countdown_end_ms.store(0, Ordering::Relaxed);
+}
+
 fn ensure_main_window(app: &tauri::AppHandle) {
     if app.get_webview_window(MAIN_WINDOW_LABEL).is_none() {
         let _ =
@@ -1096,6 +1111,7 @@ pub fn run() {
             last_sync_at: Mutex::new(None),
             last_sync_error: Mutex::new(None),
             db: db_arc,
+            countdown_end_ms: Arc::new(AtomicI64::new(0)),
         })
         .setup(|app| {
             // Re-open DB with proper app data path if possible
@@ -1139,6 +1155,45 @@ pub fn run() {
             }
             let snapshot = app.state::<AppState>().timer.lock().unwrap().snapshot();
             update_tray_menu(&app.handle(), &snapshot);
+
+            // Spawn a native thread that ticks every second while a countdown is active.
+            // It emits "countdown-tick" events via Tauri IPC, which are NOT subject to
+            // browser timer throttling — so the tray badge stays accurate even when the
+            // webview is hidden/background.
+            let tick_handle = app.handle().clone();
+            let tick_end_ms = app.state::<AppState>().countdown_end_ms.clone();
+            std::thread::spawn(move || {
+                let mut last_tick = Instant::now();
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(last_tick);
+                    last_tick = now;
+
+                    let end_ms = tick_end_ms.load(Ordering::Relaxed);
+                    if end_ms <= 0 {
+                        continue;
+                    }
+
+                    // If the thread slept far longer than 1s, the machine was asleep.
+                    // Push the countdown end time forward so remaining time is preserved
+                    // — the user wasn't working during system sleep.
+                    if elapsed > Duration::from_secs(5) {
+                        let sleep_overshoot_ms = elapsed.as_millis() as i64 - 1000;
+                        tick_end_ms.fetch_add(sleep_overshoot_ms, Ordering::Relaxed);
+                    }
+
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let adjusted_end = tick_end_ms.load(Ordering::Relaxed);
+                    let remaining =
+                        ((adjusted_end - now_ms) as f64 / 1000.0).ceil().max(0.0) as i64;
+                    let _ = tick_handle.emit("countdown-tick", remaining);
+                    if remaining <= 0 {
+                        tick_end_ms.store(0, Ordering::Relaxed);
+                    }
+                }
+            });
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1220,7 +1275,9 @@ pub fn run() {
             resume_timer,
             stop_timer,
             open_external_url,
-            set_tray_timer_badge
+            set_tray_timer_badge,
+            start_countdown,
+            stop_countdown
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Tracklet app");

@@ -149,6 +149,10 @@ async function invokeOrMock(command, args = {}) {
     return null;
   }
 
+  if (command === 'start_countdown' || command === 'stop_countdown') {
+    return null;
+  }
+
   throw new Error(`No mock response for command: ${command}`);
 }
 
@@ -265,4 +269,12 @@ export async function setTrayTimerBadge(pngDataUrl, timerLabel) {
     pngDataUrl,
     timerLabel
   });
+}
+
+export async function startCountdown(totalSeconds) {
+  return invokeOrMock('start_countdown', { totalSeconds });
+}
+
+export async function stopCountdown() {
+  return invokeOrMock('stop_countdown');
 }

@@ -17,6 +17,8 @@ import {
   resumeTimer,
   selectJiraSite,
   setTrayTimerBadge,
+  startCountdown,
+  stopCountdown,
   startTimer,
   stopTimer,
   timerSnapshot,
@@ -60,7 +62,6 @@ const BREAK_ISSUE = {
 
 const MAX_MINUTES = 120;
 const COUNTDOWN_TICK_MS = 1000;
-const SLEEP_GAP_THRESHOLD_MS = 5000;
 const MENU_BADGE_COLOR = '#1868DB';
 const MENU_BADGE_RADIUS = 5;
 const MENU_BADGE_HEIGHT = 24;
@@ -312,9 +313,7 @@ export default function App() {
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = useState(false);
 
   const autoStoppingRef = useRef(false);
-  const lastCountdownTickMsRef = useRef<number | null>(null);
   const countdownEndMsRef = useRef(0);
-  const sleepTransitionInFlightRef = useRef(false);
   const lastFocusIssueRef = useRef<{ issueKey: string; summary: string } | null>(null);
   const latestTrayLabelRef = useRef('');
   const activeCountdownTotalRef = useRef<number | null>(null);
@@ -489,51 +488,50 @@ export default function App() {
 
   useEffect(() => {
     if (!isCountdownRunning) {
-      lastCountdownTickMsRef.current = null;
-      sleepTransitionInFlightRef.current = false;
       return;
     }
 
     // Compute the wall-clock end time from the current remaining seconds.
     countdownEndMsRef.current = Date.now() + (remainingSeconds ?? totalInputSeconds) * 1000;
-    lastCountdownTickMsRef.current = Date.now();
 
-    const tickHandle = setInterval(() => {
-      const nowMs = Date.now();
-      const previousTickMs = lastCountdownTickMsRef.current ?? nowMs;
-      const gapMs = nowMs - previousTickMs;
-
-      if (gapMs > SLEEP_GAP_THRESHOLD_MS && !sleepTransitionInFlightRef.current) {
-        const inferredSleepStartMs = previousTickMs + COUNTDOWN_TICK_MS;
-        const sleepDurationMs = nowMs - inferredSleepStartMs;
-        // Timer should not count during sleep — push end time forward.
-        countdownEndMsRef.current += sleepDurationMs;
-        sleepTransitionInFlightRef.current = true;
-
-        void (async () => {
-          try {
-            await pauseTimer(new Date(inferredSleepStartMs).toISOString());
-            await resumeTimer(new Date(nowMs).toISOString());
-            await refreshSnapshot();
-          } catch {
-            // Ignore transition errors to avoid interrupting the local countdown.
-          } finally {
-            sleepTransitionInFlightRef.current = false;
-          }
-        })();
-      }
-
-      lastCountdownTickMsRef.current = nowMs;
-      // Derive remaining time from wall clock — immune to interval jitter.
-      const remaining = Math.max(0, Math.ceil((countdownEndMsRef.current - nowMs) / 1000));
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((countdownEndMsRef.current - Date.now()) / 1000));
       setRemainingSeconds(remaining);
-    }, COUNTDOWN_TICK_MS);
+
+      // Update tray badge directly from wall clock so it stays accurate
+      // even when the webview is throttled in the background.
+      if (isTrayFontReady) {
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        const label = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        if (label !== latestTrayLabelRef.current) {
+          latestTrayLabelRef.current = label;
+          const png = renderTrayTimerBadge(label, accentColor);
+          if (png) {
+            void setTrayTimerBadge(png, label).catch(() => {
+              latestTrayLabelRef.current = '';
+            });
+          }
+        }
+      }
+    };
+
+    const tickHandle = setInterval(tick, COUNTDOWN_TICK_MS);
+
+    // When the window becomes visible again after being in the background,
+    // immediately sync the display so the countdown jumps to the correct time.
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       clearInterval(tickHandle);
-      lastCountdownTickMsRef.current = null;
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isCountdownRunning]);
+  }, [isCountdownRunning, isTrayFontReady, accentColor]);
 
   useEffect(() => {
     if (remainingSeconds === null || active) {
@@ -561,6 +559,7 @@ export default function App() {
         setRemainingSeconds(null);
         activeCountdownTotalRef.current = null;
         autoStoppingRef.current = false;
+        void stopCountdown();
 
         const nextType = timerType === 'focus' ? 'break' : 'focus';
         setTimerType(nextType);
@@ -674,6 +673,45 @@ export default function App() {
       unlisten?.();
     };
   }, []);
+
+  // Listen for native countdown ticks from the Rust background thread.
+  // These arrive via Tauri IPC (not browser timers) so they are NOT throttled
+  // when the webview is hidden — keeping the tray badge second-accurate.
+  useEffect(() => {
+    const tauriEvent = (globalThis as any)?.window?.__TAURI__?.event;
+    if (!tauriEvent) return;
+
+    let unlisten: (() => void) | null = null;
+    tauriEvent.listen('countdown-tick', (event: any) => {
+      const remaining = event.payload as number;
+      setRemainingSeconds(remaining);
+      // Keep the frontend wall-clock ref in sync with the Rust source of truth.
+      // This corrects drift after system sleep (Rust adjusts its end time but
+      // the frontend ref is a separate value).
+      countdownEndMsRef.current = Date.now() + remaining * 1000;
+
+      if (isTrayFontReady) {
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        const label = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        if (label !== latestTrayLabelRef.current) {
+          latestTrayLabelRef.current = label;
+          const png = renderTrayTimerBadge(label, accentColor);
+          if (png) {
+            void setTrayTimerBadge(png, label).catch(() => {
+              latestTrayLabelRef.current = '';
+            });
+          }
+        }
+      }
+    }).then((fn: () => void) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [isTrayFontReady, accentColor]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
@@ -887,9 +925,13 @@ export default function App() {
       if (active.state === 'Paused') {
         await resumeTimer();
         setIsCountdownRunning(true);
+        if (remainingSeconds != null && remainingSeconds > 0) {
+          void startCountdown(remainingSeconds);
+        }
       } else {
         await pauseTimer();
         setIsCountdownRunning(false);
+        void stopCountdown();
       }
       await refreshSnapshot();
       return;
@@ -909,6 +951,7 @@ export default function App() {
     activeCountdownTotalRef.current = totalInputSeconds;
     setRemainingSeconds(totalInputSeconds);
     setIsCountdownRunning(true);
+    void startCountdown(totalInputSeconds);
   }
 
   async function handleStopTimer() {
@@ -918,6 +961,7 @@ export default function App() {
     setIsCountdownRunning(false);
     setRemainingSeconds(null);
     activeCountdownTotalRef.current = null;
+    void stopCountdown();
     const duration = timerType === 'focus' ? focusDurationMinutes : breakDurationMinutes;
     setDurationMinutes(formatMinutesValue(duration));
     setDurationSeconds('00');
@@ -932,6 +976,7 @@ export default function App() {
     setIsCountdownRunning(false);
     setRemainingSeconds(null);
     activeCountdownTotalRef.current = null;
+    void stopCountdown();
 
     const nextType = timerType === 'focus' ? 'break' : 'focus';
     setTimerType(nextType);
