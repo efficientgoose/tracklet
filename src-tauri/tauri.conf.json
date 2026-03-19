@@ -14,7 +14,7 @@
     "withGlobalTauri": true,
     "trayIcon": {
       "id": "main",
-      "iconPath": "icons/tray-clock-template.png",
+      "iconPath": "icons/tray-leaf-template.png",
       "iconAsTemplate": false,
       "menuOnLeftClick": false,
       "showMenuOnLeftClick": false,
@@ -31,7 +31,7 @@
       "icons/icon-1024.png"
     ],
     "resources": [
-      "icons/tray-clock-template.png"
+      "icons/tray-leaf-template.png"
     ]
   }
 }
