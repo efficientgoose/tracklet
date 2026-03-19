@@ -8,7 +8,7 @@ use base64::Engine;
 use models::{JiraIssue, TimerSnapshot};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::image::Image;
@@ -21,6 +21,134 @@ use timer_engine::TimerEngine;
 const MAIN_WINDOW_LABEL: &str = "main";
 const MAIN_WINDOW_WIDTH: f64 = 368.0;
 const MAIN_WINDOW_HEIGHT: f64 = 520.0;
+
+// Tray badge rendering constants (matches the frontend's badge style).
+const TRAY_BADGE_COLOR_FOCUS: [u8; 3] = [0x00, 0x7A, 0xFF]; // #007AFF
+const TRAY_BADGE_COLOR_BREAK: [u8; 3] = [0x21, 0x6E, 0x4E]; // #216e4e
+const TRAY_BADGE_HEIGHT: u32 = 24;
+const TRAY_BADGE_RADIUS: f32 = 5.0;
+const TRAY_BADGE_H_PAD: f32 = 10.0;
+const TRAY_BADGE_FONT_SIZE: f32 = 18.0;
+const TRAY_BADGE_SCALE: u32 = 2; // retina
+
+static DEFAULT_TRAY_ICON: &[u8] = include_bytes!("../icons/tray-leaf-template.png");
+/// Inter Bold (weight 700) for the tray badge text.
+static BADGE_FONT: &[u8] = include_bytes!("../fonts/Inter-Bold.ttf");
+
+/// Render the coloured pill badge as a PNG for the tray icon.
+fn render_tray_badge(label: &str, color: [u8; 3]) -> Option<Vec<u8>> {
+    use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont};
+
+    let scale = TRAY_BADGE_SCALE;
+
+    let font = FontRef::try_from_slice(BADGE_FONT).ok()?;
+
+    let px_size = TRAY_BADGE_FONT_SIZE * scale as f32;
+    let px_scale = PxScale::from(px_size);
+    let scaled = font.as_scaled(px_scale);
+
+    // Measure text width.
+    let mut text_width: f32 = 0.0;
+    let mut prev_id = None;
+    for ch in label.chars() {
+        let gid = font.glyph_id(ch);
+        if let Some(prev) = prev_id {
+            text_width += scaled.kern(prev, gid);
+        }
+        text_width += scaled.h_advance(gid);
+        prev_id = Some(gid);
+    }
+
+    let min_w = 52.0 * scale as f32;
+    let badge_w = (text_width + TRAY_BADGE_H_PAD * 2.0 * scale as f32).max(min_w);
+    let w = badge_w.ceil() as u32;
+    let h = TRAY_BADGE_HEIGHT * scale;
+    let fw = w as f32;
+    let fh = h as f32;
+
+    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+
+    // Draw rounded rectangle background.
+    let r = TRAY_BADGE_RADIUS * scale as f32;
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(r, 0.0);
+    pb.line_to(fw - r, 0.0);
+    pb.quad_to(fw, 0.0, fw, r);
+    pb.line_to(fw, fh - r);
+    pb.quad_to(fw, fh, fw - r, fh);
+    pb.line_to(r, fh);
+    pb.quad_to(0.0, fh, 0.0, fh - r);
+    pb.line_to(0.0, r);
+    pb.quad_to(0.0, 0.0, r, 0.0);
+    pb.close();
+    let path = pb.finish()?;
+
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(color[0], color[1], color[2], 255);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(),
+        None,
+    );
+
+    // Draw white text centred on the badge.
+    // Use the cap-height (top of '0') for optical vertical centering, matching
+    // the Canvas2D `textBaseline = 'middle'` + 0.25 offset the frontend used.
+    let ascent = scaled.ascent();
+    let descent = scaled.descent();
+    // Vertically centre the em-box, then nudge +0.5 scaled px (matches the
+    // frontend's +0.25 logical-px tweak at 2×).
+    let baseline_y = (fh + ascent + descent) / 2.0 + 0.5;
+    let text_x = (fw - text_width) / 2.0;
+
+    let mut x = text_x;
+    prev_id = None;
+    for ch in label.chars() {
+        let gid = font.glyph_id(ch);
+        if let Some(prev) = prev_id {
+            x += scaled.kern(prev, gid);
+        }
+
+        let glyph = Glyph {
+            id: gid,
+            scale: px_scale,
+            position: ab_glyph::point(x, baseline_y),
+        };
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                    let idx = ((py as u32) * w + (px as u32)) as usize * 4;
+                    let pixels = pixmap.data_mut();
+                    let c = coverage;
+                    // Blend white onto fully-opaque background (premultiplied).
+                    pixels[idx] = (255.0 * c + pixels[idx] as f32 * (1.0 - c)) as u8;
+                    pixels[idx + 1] = (255.0 * c + pixels[idx + 1] as f32 * (1.0 - c)) as u8;
+                    pixels[idx + 2] = (255.0 * c + pixels[idx + 2] as f32 * (1.0 - c)) as u8;
+                    pixels[idx + 3] = 255;
+                }
+            });
+        }
+
+        x += scaled.h_advance(gid);
+        prev_id = Some(gid);
+    }
+
+    pixmap.encode_png().ok()
+}
+
+fn restore_default_tray_icon(app: &tauri::AppHandle) {
+    if let Some(tray) = app.tray_by_id("main") {
+        if let Ok(icon) = Image::from_bytes(DEFAULT_TRAY_ICON) {
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+}
 
 struct AppState {
     timer: Mutex<TimerEngine>,
@@ -35,6 +163,8 @@ struct AppState {
     /// Unix-millis timestamp when the current countdown should reach zero.
     /// 0 means no active countdown.
     countdown_end_ms: Arc<AtomicI64>,
+    /// Whether the active countdown is a break (green badge) vs focus (blue badge).
+    countdown_is_break: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,16 +305,6 @@ fn callback_waiting_html(message: &str) -> String {
          <h3>Tracklet callback listener</h3><p>{}</p><p>You can close this tab.</p></body></html>",
         message
     )
-}
-
-fn decode_png_data_url(png_data_url: &str) -> Result<Vec<u8>, String> {
-    let encoded = png_data_url
-        .strip_prefix("data:image/png;base64,")
-        .ok_or_else(|| "Expected data:image/png;base64 payload for tray badge".to_string())?;
-
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|error| format!("Failed to decode tray badge image: {error}"))
 }
 
 fn normalize_path(path: &str) -> String {
@@ -931,17 +1051,28 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Render and set the tray badge from a text label.  Used by the frontend for
+/// idle/paused states, and by the native tick thread for countdown states.
+/// Both paths share the same `render_tray_badge` function so the icon always
+/// looks identical.
 #[tauri::command]
 fn set_tray_timer_badge(
     app: tauri::AppHandle,
-    png_data_url: String,
-    timer_label: Option<String>,
+    timer_label: String,
+    is_break: Option<bool>,
 ) -> Result<(), String> {
     let tray = app
         .tray_by_id("main")
         .ok_or_else(|| "Tray icon with id `main` was not found".to_string())?;
 
-    let png_bytes = decode_png_data_url(&png_data_url)?;
+    let color = if is_break.unwrap_or(false) {
+        TRAY_BADGE_COLOR_BREAK
+    } else {
+        TRAY_BADGE_COLOR_FOCUS
+    };
+
+    let png_bytes = render_tray_badge(&timer_label, color)
+        .ok_or_else(|| "Failed to render tray badge".to_string())?;
     let icon = Image::from_bytes(&png_bytes)
         .map_err(|error| format!("Failed to parse tray badge image: {error}"))?;
 
@@ -949,24 +1080,25 @@ fn set_tray_timer_badge(
         .map_err(|error| format!("Failed to disable template tray icon mode: {error}"))?;
     tray.set_icon(Some(icon))
         .map_err(|error| format!("Failed to update tray badge icon: {error}"))?;
-
-    if let Some(label) = timer_label {
-        tray.set_tooltip(Some(format!("Tracklet {label}")))
-            .map_err(|error| format!("Failed to update tray tooltip: {error}"))?;
-    }
+    tray.set_tooltip(Some(format!("Tracklet {timer_label}")))
+        .map_err(|error| format!("Failed to update tray tooltip: {error}"))?;
 
     Ok(())
 }
 
 #[tauri::command]
-fn start_countdown(state: State<'_, AppState>, total_seconds: i64) {
+fn start_countdown(state: State<'_, AppState>, total_seconds: i64, is_break: Option<bool>) {
     let end_ms = chrono::Utc::now().timestamp_millis() + total_seconds * 1000;
     state.countdown_end_ms.store(end_ms, Ordering::Relaxed);
+    state
+        .countdown_is_break
+        .store(is_break.unwrap_or(false), Ordering::Relaxed);
 }
 
 #[tauri::command]
-fn stop_countdown(state: State<'_, AppState>) {
+fn stop_countdown(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.countdown_end_ms.store(0, Ordering::Relaxed);
+    restore_default_tray_icon(&app);
 }
 
 fn ensure_main_window(app: &tauri::AppHandle) {
@@ -1112,6 +1244,7 @@ pub fn run() {
             last_sync_error: Mutex::new(None),
             db: db_arc,
             countdown_end_ms: Arc::new(AtomicI64::new(0)),
+            countdown_is_break: Arc::new(AtomicBool::new(false)),
         })
         .setup(|app| {
             // Re-open DB with proper app data path if possible
@@ -1162,8 +1295,11 @@ pub fn run() {
             // webview is hidden/background.
             let tick_handle = app.handle().clone();
             let tick_end_ms = app.state::<AppState>().countdown_end_ms.clone();
+            let tick_is_break = app.state::<AppState>().countdown_is_break.clone();
             std::thread::spawn(move || {
                 let mut last_tick = Instant::now();
+                let mut last_badge_label = String::new();
+                let mut last_badge_is_break = false;
                 loop {
                     std::thread::sleep(Duration::from_secs(1));
                     let now = Instant::now();
@@ -1188,6 +1324,39 @@ pub fn run() {
                     let remaining =
                         ((adjusted_end - now_ms) as f64 / 1000.0).ceil().max(0.0) as i64;
                     let _ = tick_handle.emit("countdown-tick", remaining);
+
+                    // Render the tray badge icon directly from native code so
+                    // the countdown stays accurate even when macOS throttles
+                    // the webview in the background.
+                    let is_break = tick_is_break.load(Ordering::Relaxed);
+                    if remaining > 0 {
+                        let mins = remaining / 60;
+                        let secs = remaining % 60;
+                        let label = format!("{mins:02}:{secs:02}");
+                        // Only re-render when the label or color actually changed.
+                        if label != last_badge_label || is_break != last_badge_is_break {
+                            last_badge_label = label.clone();
+                            last_badge_is_break = is_break;
+                            let color = if is_break {
+                                TRAY_BADGE_COLOR_BREAK
+                            } else {
+                                TRAY_BADGE_COLOR_FOCUS
+                            };
+                            if let Some(tray) = tick_handle.tray_by_id("main") {
+                                if let Some(png_bytes) = render_tray_badge(&label, color) {
+                                    if let Ok(icon) = Image::from_bytes(&png_bytes) {
+                                        let _ = tray.set_icon_as_template(false);
+                                        let _ = tray.set_icon(Some(icon));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Countdown finished — restore the default clock icon.
+                        last_badge_label.clear();
+                        restore_default_tray_icon(&tick_handle);
+                    }
+
                     if remaining <= 0 {
                         tick_end_ms.store(0, Ordering::Relaxed);
                     }

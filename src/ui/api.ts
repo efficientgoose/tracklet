@@ -264,15 +264,15 @@ export async function stopTimer(at = undefined) {
   });
 }
 
-export async function setTrayTimerBadge(pngDataUrl, timerLabel) {
+export async function setTrayTimerBadge(timerLabel: string, isBreak?: boolean) {
   return invokeOrMock('set_tray_timer_badge', {
-    pngDataUrl,
-    timerLabel
+    timerLabel,
+    isBreak
   });
 }
 
-export async function startCountdown(totalSeconds) {
-  return invokeOrMock('start_countdown', { totalSeconds });
+export async function startCountdown(totalSeconds, isBreak?: boolean) {
+  return invokeOrMock('start_countdown', { totalSeconds, isBreak });
 }
 
 export async function stopCountdown() {

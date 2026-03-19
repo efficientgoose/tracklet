@@ -62,11 +62,6 @@ const BREAK_ISSUE = {
 
 const MAX_MINUTES = 120;
 const COUNTDOWN_TICK_MS = 1000;
-const MENU_BADGE_COLOR = '#1868DB';
-const MENU_BADGE_RADIUS = 5;
-const MENU_BADGE_HEIGHT = 24;
-const MENU_BADGE_HORIZONTAL_PADDING = 10;
-const MENU_BADGE_FONT = '600 16px "Inter"';
 const RING_RADIUS = 85;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
@@ -135,60 +130,6 @@ function normalizeMinutesValue(value: string) {
   }
 
   return formatMinutesValue(Math.max(0, Math.min(MAX_MINUTES, parsed)));
-}
-
-function drawRoundedRect(context: CanvasRenderingContext2D, width: number, height: number, radius: number) {
-  const clampedRadius = Math.min(radius, width / 2, height / 2);
-
-  context.beginPath();
-  context.moveTo(clampedRadius, 0);
-  context.lineTo(width - clampedRadius, 0);
-  context.quadraticCurveTo(width, 0, width, clampedRadius);
-  context.lineTo(width, height - clampedRadius);
-  context.quadraticCurveTo(width, height, width - clampedRadius, height);
-  context.lineTo(clampedRadius, height);
-  context.quadraticCurveTo(0, height, 0, height - clampedRadius);
-  context.lineTo(0, clampedRadius);
-  context.quadraticCurveTo(0, 0, clampedRadius, 0);
-  context.closePath();
-}
-
-function renderTrayTimerBadge(timerLabel: string, color: string) {
-  if (!globalThis?.document) {
-    return null;
-  }
-
-  const measurementCanvas = globalThis.document.createElement('canvas');
-  const measurementContext = measurementCanvas.getContext('2d');
-  if (!measurementContext) {
-    return null;
-  }
-
-  measurementContext.font = MENU_BADGE_FONT;
-  const textWidth = Math.ceil(measurementContext.measureText(timerLabel).width);
-  const badgeWidth = Math.max(52, textWidth + MENU_BADGE_HORIZONTAL_PADDING * 2);
-  const devicePixelRatio = Math.max(1, Math.ceil(globalThis.devicePixelRatio || 1));
-
-  const canvas = globalThis.document.createElement('canvas');
-  canvas.width = badgeWidth * devicePixelRatio;
-  canvas.height = MENU_BADGE_HEIGHT * devicePixelRatio;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    return null;
-  }
-
-  context.scale(devicePixelRatio, devicePixelRatio);
-  context.fillStyle = color;
-  drawRoundedRect(context, badgeWidth, MENU_BADGE_HEIGHT, MENU_BADGE_RADIUS);
-  context.fill();
-
-  context.fillStyle = '#ffffff';
-  context.font = MENU_BADGE_FONT;
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText(timerLabel, badgeWidth / 2, MENU_BADGE_HEIGHT / 2 + 0.25);
-
-  return canvas.toDataURL('image/png');
 }
 
 function logoClock() {
@@ -291,7 +232,6 @@ export default function App() {
   const [durationSeconds, setDurationSeconds] = useState('00');
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isCountdownRunning, setIsCountdownRunning] = useState(false);
-  const [isTrayFontReady, setIsTrayFontReady] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [focusDurationMinutes, setFocusDurationMinutes] = useState(() => {
     const saved = localStorage.getItem('tracklet.focusDuration');
@@ -494,26 +434,11 @@ export default function App() {
     // Compute the wall-clock end time from the current remaining seconds.
     countdownEndMsRef.current = Date.now() + (remainingSeconds ?? totalInputSeconds) * 1000;
 
+    // The tray badge is now rendered by the Rust background thread.
+    // This browser-side interval only updates the in-window display.
     const tick = () => {
       const remaining = Math.max(0, Math.ceil((countdownEndMsRef.current - Date.now()) / 1000));
       setRemainingSeconds(remaining);
-
-      // Update tray badge directly from wall clock so it stays accurate
-      // even when the webview is throttled in the background.
-      if (isTrayFontReady) {
-        const mins = Math.floor(remaining / 60);
-        const secs = remaining % 60;
-        const label = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-        if (label !== latestTrayLabelRef.current) {
-          latestTrayLabelRef.current = label;
-          const png = renderTrayTimerBadge(label, accentColor);
-          if (png) {
-            void setTrayTimerBadge(png, label).catch(() => {
-              latestTrayLabelRef.current = '';
-            });
-          }
-        }
-      }
     };
 
     const tickHandle = setInterval(tick, COUNTDOWN_TICK_MS);
@@ -531,7 +456,7 @@ export default function App() {
       clearInterval(tickHandle);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isCountdownRunning, isTrayFontReady, accentColor]);
+  }, [isCountdownRunning]);
 
   useEffect(() => {
     if (remainingSeconds === null || active) {
@@ -572,48 +497,12 @@ export default function App() {
     void stopWhenComplete();
   }, [isCountdownRunning, remainingSeconds, timerType, focusDurationMinutes, breakDurationMinutes]);
 
+
+  // Update the tray badge for idle / paused states.  The Rust background
+  // thread handles the badge while the countdown is active.  Both paths use
+  // the same native render_tray_badge() so the icon always looks identical.
   useEffect(() => {
-    let cancelled = false;
-
-    const fontSet = globalThis?.document?.fonts;
-    if (!fontSet || typeof fontSet.load !== 'function') {
-      setIsTrayFontReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const markTrayFontReady = () => {
-      if (cancelled) {
-        return;
-      }
-
-      latestTrayLabelRef.current = '';
-      setIsTrayFontReady(true);
-    };
-
-    const waitForInter = async () => {
-      try {
-        await Promise.race([
-          fontSet.load(MENU_BADGE_FONT, '00:00'),
-          new Promise((resolve) => {
-            setTimeout(resolve, 1500);
-          })
-        ]);
-      } finally {
-        markTrayFontReady();
-      }
-    };
-
-    void waitForInter();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!isTrayFontReady) {
+    if (isCountdownRunning) {
       return;
     }
 
@@ -623,15 +512,10 @@ export default function App() {
     }
 
     latestTrayLabelRef.current = trayLabel;
-    const pngDataUrl = renderTrayTimerBadge(trayLabel, accentColor);
-    if (!pngDataUrl) {
-      return;
-    }
-
-    void setTrayTimerBadge(pngDataUrl, trayLabel).catch(() => {
+    void setTrayTimerBadge(trayLabel, timerType === 'break').catch(() => {
       latestTrayLabelRef.current = '';
     });
-  }, [isTrayFontReady, trayTimerLabel, formattedTime, accentColor, active]);
+  }, [trayTimerLabel, formattedTime, active, isCountdownRunning, timerType]);
 
   async function refreshSyncStatus() {
     const syncStatus = await getSyncStatus();
@@ -675,8 +559,9 @@ export default function App() {
   }, []);
 
   // Listen for native countdown ticks from the Rust background thread.
-  // These arrive via Tauri IPC (not browser timers) so they are NOT throttled
-  // when the webview is hidden — keeping the tray badge second-accurate.
+  // The tray badge is now rendered natively in Rust (not here) so that it
+  // stays accurate even when macOS throttles the webview in the background.
+  // This listener only updates the in-window display state.
   useEffect(() => {
     const tauriEvent = (globalThis as any)?.window?.__TAURI__?.event;
     if (!tauriEvent) return;
@@ -686,24 +571,7 @@ export default function App() {
       const remaining = event.payload as number;
       setRemainingSeconds(remaining);
       // Keep the frontend wall-clock ref in sync with the Rust source of truth.
-      // This corrects drift after system sleep (Rust adjusts its end time but
-      // the frontend ref is a separate value).
       countdownEndMsRef.current = Date.now() + remaining * 1000;
-
-      if (isTrayFontReady) {
-        const mins = Math.floor(remaining / 60);
-        const secs = remaining % 60;
-        const label = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-        if (label !== latestTrayLabelRef.current) {
-          latestTrayLabelRef.current = label;
-          const png = renderTrayTimerBadge(label, accentColor);
-          if (png) {
-            void setTrayTimerBadge(png, label).catch(() => {
-              latestTrayLabelRef.current = '';
-            });
-          }
-        }
-      }
     }).then((fn: () => void) => {
       unlisten = fn;
     });
@@ -711,7 +579,7 @@ export default function App() {
     return () => {
       unlisten?.();
     };
-  }, [isTrayFontReady, accentColor]);
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
@@ -926,7 +794,7 @@ export default function App() {
         await resumeTimer();
         setIsCountdownRunning(true);
         if (remainingSeconds != null && remainingSeconds > 0) {
-          void startCountdown(remainingSeconds);
+          void startCountdown(remainingSeconds, timerType === 'break');
         }
       } else {
         await pauseTimer();
@@ -951,7 +819,7 @@ export default function App() {
     activeCountdownTotalRef.current = totalInputSeconds;
     setRemainingSeconds(totalInputSeconds);
     setIsCountdownRunning(true);
-    void startCountdown(totalInputSeconds);
+    void startCountdown(totalInputSeconds, timerType === 'break');
   }
 
   async function handleStopTimer() {

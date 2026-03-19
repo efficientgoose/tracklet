@@ -19,6 +19,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
+tiny-skia = "0.11"
+ab_glyph = "0.2"
 thiserror = "2"
 url = "2"
 
